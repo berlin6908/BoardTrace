@@ -78,8 +78,9 @@ def export(args):
             raise RuntimeError(f"ONNX comparison failed for validation sample {sample['sampleId']}") from error
         reference_predictions.append(reference_row)
         onnx_predictions.append(onnx_row)
-        comparisons.append({"sampleId": sample["sampleId"], "image": sample["image"],
+        comparisons.append({"sampleId": sample["sampleId"], "image": sample["image"], "reference": sample["reference"],
             "imageSha256": hashlib.sha256((args.data_root / sample["image"]).read_bytes()).hexdigest(),
+            "referenceSha256": hashlib.sha256((args.data_root / sample["reference"]).read_bytes()).hexdigest(),
             "detections": len(actual[1]), "maxBoxDelta": float(np.max(np.abs(expected[0] - actual[0]), initial=0)),
             "maxScoreDelta": float(np.max(np.abs(expected[2] - actual[2]), initial=0)),
             "boxes": actual[0].tolist(), "labels": actual[1].tolist(), "scores": actual[2].tolist()})
@@ -95,8 +96,9 @@ def export(args):
         "modelSourceSha256": source_hash, "exportSourceSha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "referenceNms": "TorchVision coordinate trick, matching GPU and ONNX tracing; export process only",
         "input": {"name": "images", "shape": [1, 3, 640, 640], "dtype": "float32",
-            "layout": "NCHW", "color": "RGB", "scale": "pixel / 255", "resize": "640x640 required",
-            "normalization": "ImageNet mean/std inside model; do not apply it twice"},
+            "layout": "NCHW", "channels": ["tested grayscale", "reference grayscale", "absolute grayscale difference"],
+            "scale": "each 8-bit channel / 255", "resize": "640x640 aligned pair required",
+            "normalization": "each channel (value - 0.5) / 0.5 inside model; do not apply it twice"},
         "outputs": {"boxes": "float32 Nx4 continuous xyxy pixels", "labels": "int64 N class IDs", "scores": "float32 N"},
         "classes": {str(index): name for index, name in enumerate(CLASS_NAMES, 1)},
         "postprocessing": {"nms": "inside ONNX", "confidenceThreshold": state["identity"]["evaluationProtocol"]["confidenceThreshold"],

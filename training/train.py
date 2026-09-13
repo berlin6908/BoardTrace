@@ -97,7 +97,7 @@ def validate(model, dataset, device, protocol):
         rows.append(row)
     report = evaluate_predictions(dataset.truths, rows, protocol)
     warm = [row["elapsedMs"] for row in rows[1:] if row["execution"] == "Completed"]
-    report["latency"] = {"scope": "decode+RGB float CHW+device transfer+model+CPU outputs", "concurrency": 1,
+    report["latency"] = {"scope": "decode+SHA-verified tested/reference grayscale+absolute difference CHW+device transfer+model+CPU outputs", "concurrency": 1,
                          "excludedInitialCalls": 1, "initialCallMs": rows[0]["elapsedMs"],
                          "initialCallExecution": rows[0]["execution"], "steadySamples": len(warm),
                          "p50Ms": float(np.percentile(warm, 50)) if warm else None,

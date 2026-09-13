@@ -35,14 +35,18 @@ class DeepPcbDataset(Dataset):
         return len(self.rows)
 
     def load_image(self, index):
-        raw = (self.data_root / self.rows[index]["image"]).read_bytes()
-        if hashlib.sha256(raw).hexdigest() != self.rows[index]["imageSha256"]:
-            raise ValueError(f"Image differs from the pinned manifest: {self.rows[index]['sampleId']}")
-        image = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_COLOR)
-        if image is None or image.shape[:2] != (640, 640):
-            raise ValueError(f"Invalid 640x640 image: {self.rows[index]['sampleId']}")
-        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        return torch.from_numpy(rgb.copy()).permute(2, 0, 1).float().div_(255)
+        channels = []
+        for path_key, hash_key in (("image", "imageSha256"), ("reference", "referenceSha256")):
+            raw = (self.data_root / self.rows[index][path_key]).read_bytes()
+            if hashlib.sha256(raw).hexdigest() != self.rows[index][hash_key]:
+                raise ValueError(f"{path_key} differs from the pinned manifest: {self.rows[index]['sampleId']}")
+            image = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
+            if image is None or image.shape != (640, 640):
+                raise ValueError(f"Invalid 640x640 {path_key}: {self.rows[index]['sampleId']}")
+            channels.append(image)
+        tested, reference = channels
+        paired = np.stack((tested, reference, cv2.absdiff(tested, reference)))
+        return torch.from_numpy(paired.copy()).float().div_(255)
 
     def __getitem__(self, index):
         image = tv_tensors.Image(self.load_image(index))
