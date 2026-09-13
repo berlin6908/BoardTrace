@@ -4,6 +4,7 @@ using System.Text.Json;
 using BoardTrace.Contracts;
 using BoardTrace.Server.Storage;
 using BoardTrace.Vision;
+using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 
 namespace BoardTrace.Server.Recipes;
@@ -13,24 +14,34 @@ public sealed class RecipeValidationWorker(IServiceScopeFactory scopes, IConfigu
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        await using (var scope = scopes.CreateAsyncScope())
-        {
-            var db = scope.ServiceProvider.GetRequiredService<BoardTraceDbContext>();
-            var interrupted = await db.ValidationRuns.Where(x => x.Status == "Running").ToListAsync(stoppingToken);
-            foreach (var run in interrupted)
-            {
-                run.Status = "Failed";
-                run.Error = "服务重启中断验证；请重新发起。";
-                run.CompletedAt = DateTimeOffset.UtcNow;
-            }
-            await db.SaveChangesAsync(stoppingToken);
-        }
+        var recoverInterrupted = true;
+        var databaseInterrupted = false;
+        Guid? activeRunId = null;
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
                 await using var scope = scopes.CreateAsyncScope();
                 var db = scope.ServiceProvider.GetRequiredService<BoardTraceDbContext>();
+                if (recoverInterrupted)
+                {
+                    // A failed write may have committed. Re-read durable state in a new
+                    // context: preserve a committed completion, never replay unfinished work.
+                    var interrupted = await db.ValidationRuns.Where(x => x.Status == "Running" ||
+                        (x.Id == activeRunId && x.Status == "Queued")).ToListAsync(stoppingToken);
+                    foreach (var item in interrupted)
+                    {
+                        item.Status = "Failed";
+                        item.Error = databaseInterrupted ? "数据库连接中断验证；请重新发起。" : "服务重启中断验证；请重新发起。";
+                        item.ReportJson = null;
+                        item.CompletedAt = DateTimeOffset.UtcNow;
+                    }
+                    await db.SaveChangesAsync(stoppingToken);
+                    if (databaseInterrupted) logger.LogInformation("Recipe validation database recovered; unfinished interrupted work was marked failed");
+                    recoverInterrupted = false;
+                    databaseInterrupted = false;
+                    activeRunId = null;
+                }
                 var run = await db.ValidationRuns.Where(x => x.Status == "Queued")
                     .OrderBy(x => x.CreatedAt).FirstOrDefaultAsync(stoppingToken);
                 if (run is null)
@@ -38,6 +49,7 @@ public sealed class RecipeValidationWorker(IServiceScopeFactory scopes, IConfigu
                     await Task.Delay(500, stoppingToken);
                     continue;
                 }
+                activeRunId = run.Id;
                 run.Status = "Running";
                 await db.SaveChangesAsync(stoppingToken);
                 try
@@ -48,17 +60,36 @@ public sealed class RecipeValidationWorker(IServiceScopeFactory scopes, IConfigu
                     await db.SaveChangesAsync(stoppingToken);
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { throw; }
-                catch (Exception error)
+                catch (Exception error) when (!IsDatabaseFailure(error))
                 {
                     logger.LogError(error, "Recipe validation {RunId} failed", run.Id);
                     run.Status = "Failed";
                     run.Error = error.Message;
+                    run.ReportJson = null;
                     run.CompletedAt = DateTimeOffset.UtcNow;
                     await db.SaveChangesAsync(stoppingToken);
                 }
+                activeRunId = null;
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
+            catch (Exception error) when (IsDatabaseFailure(error))
+            {
+                if (!databaseInterrupted)
+                    logger.LogError(error, "Recipe validation database unavailable; pausing worker before recovering run {RunId}", activeRunId);
+                databaseInterrupted = true;
+                recoverInterrupted = true;
+                try { await Task.Delay(TimeSpan.FromSeconds(2), stoppingToken); }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
+            }
         }
+    }
+
+    // EF can wrap the provider exception in DbUpdateException or InvalidOperationException.
+    private static bool IsDatabaseFailure(Exception error)
+    {
+        for (Exception? current = error; current is not null; current = current.InnerException)
+            if (current is SqlException) return true;
+        return false;
     }
 
     private async Task<RecipeValidationReport> ExecuteRun(ValidationRun run, BoardTraceDbContext db,
