@@ -2,6 +2,9 @@ using BoardTrace.Contracts;
 using BoardTrace.Server.Storage;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
+using BoardTrace.Server.Identity;
+using Microsoft.AspNetCore.Identity;
+using System.Security.Claims;
 
 namespace BoardTrace.Server.Inspections;
 
@@ -17,16 +20,21 @@ public static class InspectionEndpoints
     public static void MapInspections(this IEndpointRouteBuilder app)
     {
         var inspections = app.MapGroup("/api/inspections");
-        inspections.MapPut("/{id:guid}", ReceiveAsync);
-        inspections.MapGet("/", ListAsync);
-        inspections.MapGet("/{id:guid}", DetailAsync);
-        inspections.MapGet("/{id:guid}/images/{kind}", ImageAsync);
+        inspections.MapPut("/{id:guid}", ReceiveAsync).RequireAuthorization("Station");
+        inspections.MapGet("/", ListAsync).RequireAuthorization("Human");
+        inspections.MapGet("/{id:guid}", DetailAsync).RequireAuthorization("Human");
+        inspections.MapGet("/{id:guid}/images/{kind}", ImageAsync).RequireAuthorization("Human");
     }
 
-    private static async Task<IResult> ReceiveAsync(Guid id, InspectionRecord record, BoardTraceDbContext db, CancellationToken cancellationToken)
+    private static async Task<IResult> ReceiveAsync(Guid id, InspectionRecord record, BoardTraceDbContext db,
+        ClaimsPrincipal principal, UserManager<BoardTraceUser> users, CancellationToken cancellationToken)
     {
+        var station = await users.GetUserAsync(principal);
+        if (station?.StationId != record.StationId) return Results.Forbid();
         if (InspectionValidation.Validate(id, record) is string problem)
             return Results.Problem(statusCode: 400, title: "检测档案无效", detail: problem);
+        if (await users.FindByIdAsync(record.OperatorId) is null)
+            return Results.Problem(statusCode: 400, title: "操作员不存在");
         var hash = InspectionTransfer.Hash(record);
         var existing = await ReadReceiptAsync(db, id, cancellationToken);
         if (existing != null) return RepeatResult(existing, hash);
@@ -93,7 +101,7 @@ public static class InspectionEndpoints
         if (bytes is null) return Results.NotFound();
         var contentType = bytes.Length >= 8 && bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4e && bytes[3] == 0x47
             ? "image/png" : bytes.Length >= 2 && bytes[0] == 0xff && bytes[1] == 0xd8 ? "image/jpeg" : "application/octet-stream";
-        context.Response.Headers.CacheControl = "private,max-age=31536000,immutable";
+        context.Response.Headers.CacheControl = "private,no-store";
         return Results.Bytes(bytes, contentType);
     }
 }

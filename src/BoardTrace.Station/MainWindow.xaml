@@ -7,10 +7,12 @@
         <Grid.RowDefinitions><RowDefinition Height="76" /><RowDefinition Height="*" /></Grid.RowDefinitions>
         <Border Background="#142D38" Padding="25,14">
             <DockPanel>
+                <Button DockPanel.Dock="Right" Content="退出 / 换班" Command="{Binding SignOutCommand}" Margin="20,0,0,0" VerticalAlignment="Center" />
                 <StackPanel DockPanel.Dock="Right" VerticalAlignment="Center">
                     <TextBlock Text="{Binding StationId}" Foreground="White" FontSize="16" HorizontalAlignment="Right" />
                     <TextBlock Text="工程回放 · 模拟输入" Foreground="#A5CBCB" FontSize="12" Margin="0,4,0,0" />
                 </StackPanel>
+                <TextBlock DockPanel.Dock="Right" Text="{Binding OperatorName}" Foreground="White" VerticalAlignment="Center" FontSize="14" Margin="0,0,24,0" />
                 <StackPanel>
                     <TextBlock Text="BoardTrace" Foreground="White" FontSize="24" FontWeight="SemiBold" />
                     <TextBlock Text="PCB 视觉检测与质量追溯" Foreground="#A5CBCB" FontSize="12" />

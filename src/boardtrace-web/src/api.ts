@@ -1,27 +1,52 @@
 import type { InspectionDetail, InspectionPage, InspectionQuery } from './inspections'
 
-async function getJson<T>(url: string, signal: AbortSignal): Promise<T> {
+export interface CurrentUser {
+  id: string
+  userName: string
+  displayName: string
+  roles: string[]
+  stationId: string | null
+}
+
+export const roleLabels: Record<string, string> = {
+  Operator: '操作员', ProcessEngineer: '工艺工程师', QualityEngineer: '质量工程师',
+}
+
+export class ApiError extends Error {
+  constructor(public readonly status: number, message: string) { super(message) }
+}
+
+async function requestJson<T>(url: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(url, {
-    signal: AbortSignal.any([signal, AbortSignal.timeout(15000)]),
-    headers: { Accept: 'application/json' },
+    ...options,
+    signal: options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(15000)]) : AbortSignal.timeout(15000),
+    credentials: 'same-origin',
+    headers: { Accept: 'application/json', ...options.headers },
   })
   if (!response.ok) {
     const problem = await response.json().catch(() => null) as { detail?: string; title?: string } | null
-    throw new Error(problem?.detail || problem?.title || `请求失败（${response.status}）`)
+    throw new ApiError(response.status, problem?.detail || problem?.title || `请求失败（${response.status}）`)
   }
+  if (response.status === 204) return undefined as T
   return response.json() as Promise<T>
 }
+
+export function currentUser(signal?: AbortSignal): Promise<CurrentUser> { return requestJson('/api/auth/me', { signal }) }
+export function login(userName: string, password: string): Promise<CurrentUser> {
+  return requestJson('/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userName, password }) })
+}
+export function logout(): Promise<void> { return requestJson('/api/auth/logout', { method: 'POST' }) }
 
 export function listInspections(query: InspectionQuery, signal: AbortSignal): Promise<InspectionPage> {
   const params = new URLSearchParams({ page: String(query.page), pageSize: String(query.pageSize) })
   if (query.stationId) params.set('stationId', query.stationId)
   if (query.productId) params.set('productId', query.productId)
   if (query.decision) params.set('decision', query.decision)
-  return getJson(`/api/inspections?${params}`, signal)
+  return requestJson(`/api/inspections?${params}`, { signal })
 }
 
 export function getInspection(id: string, signal: AbortSignal): Promise<InspectionDetail> {
-  return getJson(`/api/inspections/${encodeURIComponent(id)}`, signal)
+  return requestJson(`/api/inspections/${encodeURIComponent(id)}`, { signal })
 }
 
 export function requestError(error: unknown): string {

@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { ElAlert, ElButton, ElCollapse, ElCollapseItem, ElEmpty, ElSkeleton, ElSwitch, ElTag } from 'element-plus'
-import { getInspection, requestError } from '../api'
+import { ApiError, currentUser, getInspection, requestError } from '../api'
 import { classLabel, decisionLabels, executionLabels, formatMs, formatTime, sourceLabel } from '../inspections'
 import type { InspectionDetail } from '../inspections'
 import EvidenceImage from './EvidenceImage.vue'
 
 const props = defineProps<{ id: string }>()
+const emit = defineEmits<{ 'session-expired': [] }>()
 const detail = ref<InspectionDetail | null>(null)
 const record = computed(() => detail.value?.inspection)
 const loading = ref(true)
@@ -27,9 +28,20 @@ async function load() {
     const response = await getInspection(props.id, request.signal)
     if (!request.signal.aborted) detail.value = response
   } catch (cause) {
-    if (!request.signal.aborted) error.value = requestError(cause)
+    if (!request.signal.aborted) {
+      if (cause instanceof ApiError && cause.status === 401) emit('session-expired')
+      else error.value = requestError(cause)
+    }
   } finally {
     if (!request.signal.aborted) loading.value = false
+  }
+}
+
+async function imageFailed() {
+  const request = detailRequest
+  try { await currentUser(request?.signal) }
+  catch (cause) {
+    if (!request?.signal.aborted && cause instanceof ApiError && cause.status === 401) emit('session-expired')
   }
 }
 
@@ -62,6 +74,7 @@ onBeforeUnmount(() => detailRequest?.abort())
 
     <dl class="detail-metadata">
       <div><dt>检测工位</dt><dd>{{ record.stationId }}</dd></div>
+      <div><dt>操作员</dt><dd>{{ record.operatorName }}</dd></div>
       <div><dt>输入样本</dt><dd>{{ record.sampleId }}</dd></div>
       <div><dt>执行状态</dt><dd>{{ executionLabels[record.executionStatus] }}</dd></div>
       <div><dt>检测耗时</dt><dd class="numeric">{{ formatMs(record.detectionMs) }}</dd></div>
@@ -74,8 +87,8 @@ onBeforeUnmount(() => detailRequest?.abort())
     <section class="image-section" aria-labelledby="image-evidence-title">
       <div class="section-heading"><h3 id="image-evidence-title">图像证据</h3><ElSwitch v-model="showBoxes" active-text="显示缺陷区域" :disabled="!record.defects.length" /></div>
       <div class="image-pair">
-        <figure><figcaption><strong>参考图</strong><span>{{ record.width }} × {{ record.height }}</span></figcaption><EvidenceImage :key="`${record.id}-reference`" :inspection-id="record.id" kind="reference" :available="detail.hasReferenceImage" :width="record.width" :height="record.height" /></figure>
-        <figure><figcaption><strong>待检图</strong><span>{{ record.defects.length }} 个区域</span></figcaption><EvidenceImage :key="`${record.id}-tested`" :inspection-id="record.id" kind="tested" :available="detail.hasTestedImage" :width="record.width" :height="record.height" :defects="record.defects" :show-boxes="showBoxes" :selected-defect="selectedDefect" @select="selectedDefect = $event" /></figure>
+        <figure><figcaption><strong>参考图</strong><span>{{ record.width }} × {{ record.height }}</span></figcaption><EvidenceImage :key="`${record.id}-reference`" :inspection-id="record.id" @failed="imageFailed" kind="reference" :available="detail.hasReferenceImage" :width="record.width" :height="record.height" /></figure>
+        <figure><figcaption><strong>待检图</strong><span>{{ record.defects.length }} 个区域</span></figcaption><EvidenceImage :key="`${record.id}-tested`" :inspection-id="record.id" @failed="imageFailed" kind="tested" :available="detail.hasTestedImage" :width="record.width" :height="record.height" :defects="record.defects" :show-boxes="showBoxes" :selected-defect="selectedDefect" @select="selectedDefect = $event" /></figure>
       </div>
       <p class="section-note">图像为本次检测保存的原始证据。区域与编号来自算法输出。</p>
     </section>

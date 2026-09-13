@@ -20,6 +20,7 @@ public sealed class InspectionUploaderTests
         var record = new InspectionRecord
         {
             Id = Guid.NewGuid(), StationId = "TEST-UPLOAD", ProductId = "SIM-" + Guid.NewGuid(), SampleId = "sample-1",
+            OperatorId = "operator-1", OperatorName = "Operator One",
             SourceKind = "Replay", RecipeId = "test-recipe", RecipeJson = "{}", StartedAt = DateTimeOffset.UtcNow
         };
         store.Begin(record);
@@ -37,6 +38,65 @@ public sealed class InspectionUploaderTests
         new(status) { Content = JsonContent.Create(new InspectionReceipt(record.Id, InspectionTransfer.Hash(record), DateTimeOffset.UtcNow)) };
 
     [Fact]
+    public async Task DeviceSessionExpiryRelogsAndRetriesTheSameRecordWithOriginalOperator()
+    {
+        var (store, record) = Setup();
+        var bodies = new List<string>();
+        var logins = 0;
+        using var client = new HttpClient(new Handler(async request =>
+        {
+            if (request.Method == HttpMethod.Post)
+            {
+                Assert.Equal("/api/auth/login", request.RequestUri!.AbsolutePath);
+                logins++;
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = JsonContent.Create(new CurrentUser("device-1", "station-test", "Device", ["Station"], record.StationId))
+                };
+            }
+            bodies.Add(await request.Content!.ReadAsStringAsync());
+            return bodies.Count == 1 ? new HttpResponseMessage(HttpStatusCode.Unauthorized) : Receipt(record);
+        })) { BaseAddress = new Uri("http://localhost/") };
+        var result = await new InspectionUploader(store, client, new StationCredentials("station-test", "test-only-password")).UploadPendingAsync();
+        Assert.Equal(1, logins);
+        Assert.Equal(2, bodies.Count);
+        Assert.Equal(bodies[0], bodies[1]);
+        Assert.Equal(1, result.Uploaded);
+        Assert.Equal(0, result.Pending);
+        Assert.Equal(record.OperatorId, store.Get(record.Id)!.OperatorId);
+        Assert.Equal(record.OperatorName, store.Get(record.Id)!.OperatorName);
+        Assert.NotNull(Assert.Single(store.ReadRecent()).AcknowledgedAt);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task InvalidDeviceLoginOrWrongStationBindingCannotAcknowledge(bool wrongBinding)
+    {
+        var (store, record) = Setup();
+        var puts = 0;
+        using var client = new HttpClient(new Handler(request =>
+        {
+            if (request.Method == HttpMethod.Put)
+            {
+                puts++;
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Unauthorized));
+            }
+            return Task.FromResult(wrongBinding ? new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = JsonContent.Create(new CurrentUser("device-1", "station-test", "Device", ["Station"], "OTHER-STATION"))
+            } : new HttpResponseMessage(HttpStatusCode.Unauthorized));
+        })) { BaseAddress = new Uri("http://localhost/") };
+        var result = await new InspectionUploader(store, client, new StationCredentials("station-test", "test-only-password")).UploadPendingAsync();
+        Assert.Equal(UploadConnection.Rejected, result.Connection);
+        Assert.Equal(1, puts);
+        Assert.Equal(1, result.Pending);
+        Assert.Equal(0, result.Uploaded);
+        Assert.DoesNotContain("test-only-password", result.Error);
+        Assert.Null(Assert.Single(store.ReadRecent()).AcknowledgedAt);
+    }
+
+    [Fact]
     public async Task LostResponseRetainsImmutableRecordAndRetryAcknowledgesTheSameContent()
     {
         var (store, record) = Setup();
@@ -49,7 +109,7 @@ public sealed class InspectionUploaderTests
             if (sentBodies.Count == 1) throw new HttpRequestException("Server committed; response was lost.");
             return Receipt(record, HttpStatusCode.OK);
         })) { BaseAddress = new Uri("http://localhost/") };
-        var uploader = new InspectionUploader(store, client);
+        var uploader = new InspectionUploader(store, client, new StationCredentials("station-test", "test-only-password"));
 
         var lost = await uploader.UploadPendingAsync();
         Assert.Equal(UploadConnection.Unavailable, lost.Connection);
@@ -83,7 +143,7 @@ public sealed class InspectionUploaderTests
             Content = JsonContent.Create(receipt)
         }))) { BaseAddress = new Uri("http://localhost/") };
 
-        var result = await new InspectionUploader(store, client).UploadPendingAsync();
+        var result = await new InspectionUploader(store, client, new StationCredentials("station-test", "test-only-password")).UploadPendingAsync();
         Assert.Equal(UploadConnection.Rejected, result.Connection);
         Assert.Equal(0, result.Uploaded);
         Assert.Equal(1, store.PendingCount());
@@ -99,7 +159,7 @@ public sealed class InspectionUploaderTests
         var (store, record) = Setup();
         using var client = new HttpClient(new Handler(_ => Task.FromResult(Receipt(record, (HttpStatusCode)status))))
             { BaseAddress = new Uri("http://localhost/") };
-        var result = await new InspectionUploader(store, client).UploadPendingAsync();
+        var result = await new InspectionUploader(store, client, new StationCredentials("station-test", "test-only-password")).UploadPendingAsync();
         Assert.Equal(connection, result.Connection);
         Assert.Equal(0, result.Uploaded);
         Assert.Equal(1, store.PendingCount());
@@ -114,7 +174,7 @@ public sealed class InspectionUploaderTests
         AddRecord(store);
         using var client = new HttpClient(new Handler(async request =>
             Receipt((await request.Content!.ReadFromJsonAsync<InspectionRecord>())!))) { BaseAddress = new Uri("http://localhost/") };
-        var result = await new InspectionUploader(store, client).UploadPendingAsync(2);
+        var result = await new InspectionUploader(store, client, new StationCredentials("station-test", "test-only-password")).UploadPendingAsync(2);
         Assert.Equal(2, result.Uploaded);
         Assert.Equal(1, result.Pending);
 
@@ -123,7 +183,7 @@ public sealed class InspectionUploaderTests
         using var command = connection.CreateCommand();
         command.CommandText = "CREATE TRIGGER reject_receipt BEFORE INSERT ON UploadReceipts BEGIN SELECT RAISE(ABORT, 'simulated acknowledgment write failure'); END;";
         command.ExecuteNonQuery();
-        await Assert.ThrowsAsync<SqliteException>(() => new InspectionUploader(store, client).UploadPendingAsync());
+        await Assert.ThrowsAsync<SqliteException>(() => new InspectionUploader(store, client, new StationCredentials("station-test", "test-only-password")).UploadPendingAsync());
         Assert.Equal(1, store.PendingCount());
         Assert.Equal(2, store.ReadRecent().Count(row => row.AcknowledgedAt is not null));
         Assert.Single(store.ReadPending());

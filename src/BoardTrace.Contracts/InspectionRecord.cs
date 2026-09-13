@@ -15,6 +15,8 @@ public sealed record InspectionRecord
     public required Guid Id { get; init; }
     public required string StationId { get; init; }
     public required string ProductId { get; init; }
+    public required string OperatorId { get; init; }
+    public required string OperatorName { get; init; }
     public required string SampleId { get; init; }
     public required string SourceKind { get; init; }
     public required string RecipeId { get; init; }

@@ -1,9 +1,11 @@
 using BoardTrace.Server.Inspections;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
+using BoardTrace.Server.Identity;
 
 namespace BoardTrace.Server.Storage;
 
-public sealed class BoardTraceDbContext(DbContextOptions<BoardTraceDbContext> options) : DbContext(options)
+public sealed class BoardTraceDbContext(DbContextOptions<BoardTraceDbContext> options) : IdentityDbContext<BoardTraceUser>(options)
 {
     public DbSet<InspectionAttempt> Inspections => Set<InspectionAttempt>();
     public DbSet<InspectionDefect> Defects => Set<InspectionDefect>();
@@ -11,12 +13,15 @@ public sealed class BoardTraceDbContext(DbContextOptions<BoardTraceDbContext> op
 
     protected override void OnModelCreating(ModelBuilder model)
     {
+        base.OnModelCreating(model);
         var inspection = model.Entity<InspectionAttempt>();
         inspection.ToTable("Inspections");
         inspection.HasKey(x => x.Id);
         inspection.Property(x => x.Id).ValueGeneratedNever();
         inspection.Property(x => x.StationId).HasMaxLength(128);
         inspection.Property(x => x.ProductId).HasMaxLength(128);
+        inspection.Property(x => x.OperatorId).HasMaxLength(450);
+        inspection.Property(x => x.OperatorName).HasMaxLength(128);
         inspection.Property(x => x.SampleId).HasMaxLength(128);
         inspection.Property(x => x.SourceKind).HasMaxLength(32);
         inspection.Property(x => x.RecipeId).HasMaxLength(128);

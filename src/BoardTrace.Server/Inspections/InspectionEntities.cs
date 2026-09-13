@@ -8,6 +8,8 @@ public sealed class InspectionAttempt
     public Guid Id { get; set; }
     public string StationId { get; set; } = "";
     public string ProductId { get; set; } = "";
+    public string OperatorId { get; set; } = "";
+    public string OperatorName { get; set; } = "";
     public string SampleId { get; set; } = "";
     public string SourceKind { get; set; } = "";
     public string RecipeId { get; set; } = "";
@@ -31,6 +33,7 @@ public sealed class InspectionAttempt
         var inspection = new InspectionAttempt
         {
             Id = record.Id, StationId = record.StationId, ProductId = record.ProductId,
+            OperatorId = record.OperatorId, OperatorName = record.OperatorName,
             SampleId = record.SampleId, SourceKind = record.SourceKind, RecipeId = record.RecipeId,
             RecipeJson = record.RecipeJson, StartedAt = record.StartedAt, CompletedAt = record.CompletedAt!.Value,
             ExecutionStatus = record.ExecutionStatus, Decision = record.Decision, Width = record.Width,
@@ -49,7 +52,8 @@ public sealed class InspectionAttempt
 
     public InspectionRecord ToRecord() => new()
     {
-        Id = Id, StationId = StationId, ProductId = ProductId, SampleId = SampleId, SourceKind = SourceKind,
+        Id = Id, StationId = StationId, ProductId = ProductId, OperatorId = OperatorId, OperatorName = OperatorName,
+        SampleId = SampleId, SourceKind = SourceKind,
         RecipeId = RecipeId, RecipeJson = RecipeJson, StartedAt = StartedAt, CompletedAt = CompletedAt,
         ExecutionStatus = ExecutionStatus, Decision = Decision, Width = Width, Height = Height,
         DetectionMs = DetectionMs, Error = Error,

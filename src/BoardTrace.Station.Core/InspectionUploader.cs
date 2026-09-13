@@ -9,7 +9,7 @@ public enum UploadConnection { Idle, Connected, Unavailable, Rejected }
 
 public sealed record UploadBatchResult(int Uploaded, int Pending, UploadConnection Connection, string? Error = null);
 
-public sealed class InspectionUploader(LocalInspectionStore store, HttpClient client)
+public sealed class InspectionUploader(LocalInspectionStore store, HttpClient client, StationCredentials credentials)
 {
     public async Task<UploadBatchResult> UploadPendingAsync(int limit = 10, CancellationToken cancellationToken = default)
     {
@@ -22,7 +22,7 @@ public sealed class InspectionUploader(LocalInspectionStore store, HttpClient cl
             cancellationToken.ThrowIfCancellationRequested();
             try
             {
-                using var response = await client.PutAsJsonAsync($"api/inspections/{record.Id:D}", record, cancellationToken);
+                using var response = await SendAsync(record, cancellationToken);
                 if (response.StatusCode is not (HttpStatusCode.OK or HttpStatusCode.Created))
                 {
                     connection = (int)response.StatusCode >= 500 ? UploadConnection.Unavailable : UploadConnection.Rejected;
@@ -61,7 +61,22 @@ public sealed class InspectionUploader(LocalInspectionStore store, HttpClient cl
                 error = $"检测 {record.Id} 的中央回执格式不正确，原件保留待处理。";
                 break;
             }
+            catch (UnauthorizedAccessException authenticationError)
+            {
+                connection = UploadConnection.Rejected;
+                error = "设备登录失败：" + authenticationError.Message;
+                break;
+            }
         }
         return new UploadBatchResult(uploaded, await Task.Run(store.PendingCount, cancellationToken), connection, error);
+    }
+
+    private async Task<HttpResponseMessage> SendAsync(InspectionRecord record, CancellationToken cancellationToken)
+    {
+        var response = await client.PutAsJsonAsync($"api/inspections/{record.Id:D}", record, cancellationToken);
+        if (response.StatusCode != HttpStatusCode.Unauthorized) return response;
+        response.Dispose();
+        await StationAuthentication.LoginDeviceAsync(client, credentials, record.StationId, cancellationToken);
+        return await client.PutAsJsonAsync($"api/inspections/{record.Id:D}", record, cancellationToken);
     }
 }

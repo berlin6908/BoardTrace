@@ -25,6 +25,8 @@ export interface DefectBox {
 }
 
 export interface InspectionRecord extends Omit<InspectionSummary, 'defectCount' | 'receivedAt'> {
+  operatorId: string
+  operatorName: string
   recipeJson: string
   width: number
   height: number

@@ -26,11 +26,14 @@ public sealed class InspectionCoordinator
 
     public bool IsFaulted => faulted;
 
-    public async Task<InspectionRecord> InspectAsync(string stationId, string productId, IImageSource source,
+    public async Task<InspectionRecord> InspectAsync(string stationId, string productId, CurrentUser operatorUser, IImageSource source,
         IProgress<string>? progress = null, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(stationId);
         ArgumentException.ThrowIfNullOrWhiteSpace(productId);
+        var actor = StationAuthentication.RequireOperator(operatorUser);
+        var operatorId = actor.Id;
+        var operatorName = actor.DisplayName;
         cancellationToken.ThrowIfCancellationRequested();
         if (Interlocked.CompareExchange(ref busy, 1, 0) != 0)
             throw new InvalidOperationException("工位忙，未接受新的检测。");
@@ -42,6 +45,7 @@ public sealed class InspectionCoordinator
                 var record = new InspectionRecord
                 {
                     Id = Guid.NewGuid(), StationId = stationId, ProductId = productId,
+                    OperatorId = operatorId, OperatorName = operatorName,
                     SampleId = source.SampleId, SourceKind = source.SourceKind,
                     RecipeId = recipeId, RecipeJson = recipeJson, StartedAt = DateTimeOffset.UtcNow
                 };

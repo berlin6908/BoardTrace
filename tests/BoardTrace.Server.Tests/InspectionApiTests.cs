@@ -2,11 +2,14 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using BoardTrace.Contracts;
+using BoardTrace.Server.Identity;
 using BoardTrace.Station.Core;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Configuration;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Data.Sqlite;
 
 namespace BoardTrace.Server.Tests;
@@ -15,7 +18,8 @@ public sealed class InspectionApiTests
 {
     private static InspectionRecord Completed(Guid? id = null) => new()
     {
-        Id = id ?? Guid.NewGuid(), StationId = "STATION-A", ProductId = "SIM-100", SampleId = "sample-100",
+        Id = id ?? Guid.NewGuid(), StationId = "STATION-A", ProductId = "SIM-100",
+        OperatorId = "operator-test", OperatorName = "Test Operator", SampleId = "sample-100",
         SourceKind = "Replay", RecipeId = "classical-test", RecipeJson = "{}",
         StartedAt = new DateTimeOffset(2026, 9, 13, 10, 0, 0, TimeSpan.Zero),
         CompletedAt = new DateTimeOffset(2026, 9, 13, 10, 0, 1, TimeSpan.Zero),
@@ -38,13 +42,15 @@ public sealed class InspectionApiTests
         Assert.Equal(InspectionTransfer.Hash(record), receipt.ContentHash);
         Assert.NotEqual(default, receipt.ReceivedAt);
 
-        using var detail = await server.Client.GetAsync($"/api/inspections/{record.Id}");
+        using var detail = await server.HumanClient.GetAsync($"/api/inspections/{record.Id}");
         Assert.Equal(HttpStatusCode.OK, detail.StatusCode);
         using var json = JsonDocument.Parse(await detail.Content.ReadAsStringAsync());
         var root = json.RootElement;
         var inspection = root.GetProperty("inspection");
         Assert.Equal(record.Id.ToString(), inspection.GetProperty("id").GetString());
         Assert.Equal("Fail", inspection.GetProperty("decision").GetString());
+        Assert.Equal(record.OperatorId, inspection.GetProperty("operatorId").GetString());
+        Assert.Equal(record.OperatorName, inspection.GetProperty("operatorName").GetString());
         Assert.Equal(1, inspection.GetProperty("defects").GetArrayLength());
         Assert.True(root.GetProperty("hasTestedImage").GetBoolean());
         Assert.True(root.GetProperty("hasReferenceImage").GetBoolean());
@@ -52,9 +58,11 @@ public sealed class InspectionApiTests
         Assert.Equal(JsonValueKind.Null, inspection.GetProperty("testedImage").ValueKind);
         Assert.Equal(JsonValueKind.Null, inspection.GetProperty("referenceImage").ValueKind);
 
-        Assert.Equal(record.TestedImage, await server.Client.GetByteArrayAsync($"/api/inspections/{record.Id}/images/tested"));
-        Assert.Equal(record.ReferenceImage, await server.Client.GetByteArrayAsync($"/api/inspections/{record.Id}/images/reference"));
-        using var list = await server.Client.GetAsync("/api/inspections?stationId=STATION-A&productId=SIM-100&decision=Fail&page=1&pageSize=10");
+        Assert.Equal(record.TestedImage, await server.HumanClient.GetByteArrayAsync($"/api/inspections/{record.Id}/images/tested"));
+        using (var protectedImage = await server.HumanClient.GetAsync($"/api/inspections/{record.Id}/images/tested"))
+            Assert.Contains("no-store", protectedImage.Headers.CacheControl?.ToString() ?? "");
+        Assert.Equal(record.ReferenceImage, await server.HumanClient.GetByteArrayAsync($"/api/inspections/{record.Id}/images/reference"));
+        using var list = await server.HumanClient.GetAsync("/api/inspections?stationId=STATION-A&productId=SIM-100&decision=Fail&page=1&pageSize=10");
         Assert.Equal(HttpStatusCode.OK, list.StatusCode);
         using var listing = JsonDocument.Parse(await list.Content.ReadAsStringAsync());
         Assert.Equal(1, listing.RootElement.GetProperty("total").GetInt32());
@@ -86,7 +94,7 @@ public sealed class InspectionApiTests
         Assert.Equal(HttpStatusCode.Created, first.StatusCode);
         using var conflict = await server.Client.PutAsJsonAsync($"/api/inspections/{record.Id}", record with { ProductId = "SIM-OTHER", TestedImage = [9] });
         Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
-        Assert.Equal(record.TestedImage, await server.Client.GetByteArrayAsync($"/api/inspections/{record.Id}/images/tested"));
+        Assert.Equal(record.TestedImage, await server.HumanClient.GetByteArrayAsync($"/api/inspections/{record.Id}/images/tested"));
         Assert.Equal((1, 1, 2), await server.CountsAsync());
     }
 
@@ -99,7 +107,7 @@ public sealed class InspectionApiTests
         using var response = await server.Client.PutAsJsonAsync($"/api/inspections/{record.Id}", record);
         Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
         Assert.Equal((0, 0, 0), await server.CountsAsync());
-        using var detail = await server.Client.GetAsync($"/api/inspections/{record.Id}");
+        using var detail = await server.HumanClient.GetAsync($"/api/inspections/{record.Id}");
         Assert.Equal(HttpStatusCode.NotFound, detail.StatusCode);
     }
 
@@ -114,7 +122,7 @@ public sealed class InspectionApiTests
         };
         using var response = await server.Client.PutAsJsonAsync($"/api/inspections/{record.Id}", record);
         Assert.Equal(HttpStatusCode.Created, response.StatusCode);
-        using var detail = await server.Client.GetAsync($"/api/inspections/{record.Id}");
+        using var detail = await server.HumanClient.GetAsync($"/api/inspections/{record.Id}");
         Assert.Equal(HttpStatusCode.OK, detail.StatusCode);
         using var json = JsonDocument.Parse(await detail.Content.ReadAsStringAsync());
         Assert.Equal("Failed", json.RootElement.GetProperty("inspection").GetProperty("executionStatus").GetString());
@@ -137,6 +145,59 @@ public sealed class InspectionApiTests
     }
 
     [Fact]
+    public async Task AnonymousAndWrongRoleCannotReadOrUpload()
+    {
+        await using var server = await TestServer.CreateAsync();
+        using var anonymous = server.CreateClient();
+        using var read = await anonymous.GetAsync("/api/inspections");
+        Assert.Equal(HttpStatusCode.Unauthorized, read.StatusCode);
+        using var upload = await anonymous.PutAsJsonAsync($"/api/inspections/{Guid.NewGuid()}", Completed());
+        Assert.Equal(HttpStatusCode.Unauthorized, upload.StatusCode);
+        using var humanUpload = await server.HumanClient.PutAsJsonAsync($"/api/inspections/{Guid.NewGuid()}", Completed());
+        Assert.Equal(HttpStatusCode.Forbidden, humanUpload.StatusCode);
+        using var stationRead = await server.Client.GetAsync("/api/inspections");
+        Assert.Equal(HttpStatusCode.Forbidden, stationRead.StatusCode);
+        Assert.Equal((0, 0, 0), await server.CountsAsync());
+    }
+
+    [Fact]
+    public async Task StationCannotUploadAnotherStationsRecordOrUnknownOperator()
+    {
+        await using var server = await TestServer.CreateAsync();
+        var foreign = Completed() with { StationId = "STATION-B" };
+        using var denied = await server.Client.PutAsJsonAsync($"/api/inspections/{foreign.Id}", foreign);
+        Assert.Equal(HttpStatusCode.Forbidden, denied.StatusCode);
+        var unknown = Completed() with { OperatorId = "not-a-user" };
+        using var invalid = await server.Client.PutAsJsonAsync($"/api/inspections/{unknown.Id}", unknown);
+        Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
+        Assert.Equal((0, 0, 0), await server.CountsAsync());
+    }
+
+    [Fact]
+    public async Task WrongPasswordFailsAndLogoutRevokesSessionCookie()
+    {
+        await using var server = await TestServer.CreateAsync();
+        using var client = server.CreateClient();
+        using var wrong = await client.PostAsJsonAsync("/api/auth/login", new LoginRequest("operator", "wrong"));
+        Assert.Equal(HttpStatusCode.Unauthorized, wrong.StatusCode);
+        using var empty = await client.PostAsJsonAsync("/api/auth/login", new LoginRequest("", ""));
+        Assert.Equal(HttpStatusCode.Unauthorized, empty.StatusCode);
+        using var before = await client.GetAsync("/api/auth/me");
+        Assert.Equal(HttpStatusCode.Unauthorized, before.StatusCode);
+        await TestServer.LoginAsync(client, "operator", "Test!Operator1");
+        using var meResponse = await client.GetAsync("/api/auth/me");
+        Assert.Contains("no-store", meResponse.Headers.CacheControl?.ToString() ?? "");
+        var me = await meResponse.Content.ReadFromJsonAsync<CurrentUser>();
+        Assert.NotNull(me);
+        Assert.Equal("operator-test", me.Id);
+        Assert.Contains("Operator", me.Roles);
+        using var logout = await client.PostAsync("/api/auth/logout", null);
+        Assert.Equal(HttpStatusCode.NoContent, logout.StatusCode);
+        using var after = await client.GetAsync("/api/auth/me");
+        Assert.Equal(HttpStatusCode.Unauthorized, after.StatusCode);
+    }
+
+    [Fact]
     public async Task CommittedCentralUploadWithLostResponseIsRetriedAndAcknowledgedLocally()
     {
         await using var server = await TestServer.CreateAsync();
@@ -152,16 +213,16 @@ public sealed class InspectionApiTests
         store.Begin(started);
         store.Complete(record);
 
-        using var client = server.CreateClientWithLostFirstResponse();
-        var uploader = new InspectionUploader(store, client);
+        using var client = await server.CreateClientWithLostFirstResponseAsync();
+        var uploader = new InspectionUploader(store, client, new StationCredentials("station-a", "Test!Station1"));
         var first = await uploader.UploadPendingAsync();
         Assert.Equal(UploadConnection.Unavailable, first.Connection);
         Assert.Equal(0, first.Uploaded);
         Assert.Equal(1, store.PendingCount());
         Assert.Null(Assert.Single(store.ReadRecent()).AcknowledgedAt);
         Assert.Equal((1, 1, 2), await server.CountsAsync());
-        Assert.Equal(record.TestedImage, await server.Client.GetByteArrayAsync($"/api/inspections/{record.Id}/images/tested"));
-        Assert.Equal(record.ReferenceImage, await server.Client.GetByteArrayAsync($"/api/inspections/{record.Id}/images/reference"));
+        Assert.Equal(record.TestedImage, await server.HumanClient.GetByteArrayAsync($"/api/inspections/{record.Id}/images/tested"));
+        Assert.Equal(record.ReferenceImage, await server.HumanClient.GetByteArrayAsync($"/api/inspections/{record.Id}/images/reference"));
 
         var second = await uploader.UploadPendingAsync();
         Assert.Equal(UploadConnection.Connected, second.Connection);
@@ -196,10 +257,15 @@ public sealed class InspectionApiTests
         private readonly string name = "BoardTrace_Integration_" + Guid.NewGuid().ToString("N");
         private WebApplicationFactory<Program>? factory;
         public HttpClient Client { get; private set; } = null!;
-        public HttpClient CreateClientWithLostFirstResponse() => new(new LoseFirstResponseHandler
+        public HttpClient HumanClient { get; private set; } = null!;
+        public HttpClient CreateClient() => factory!.CreateClient();
+        public async Task<HttpClient> CreateClientWithLostFirstResponseAsync()
         {
-            InnerHandler = factory!.Server.CreateHandler()
-        }) { BaseAddress = Client.BaseAddress };
+            var client = new HttpClient(new LoseFirstResponseHandler { InnerHandler = factory!.Server.CreateHandler() })
+                { BaseAddress = Client.BaseAddress };
+            await LoginAsync(client, "station-a", "Test!Station1");
+            return client;
+        }
         private string ConnectionString => $"Server=(localdb)\\BoardTrace;Database={name};Integrated Security=true;TrustServerCertificate=true";
         private static string MasterConnection => "Server=(localdb)\\BoardTrace;Database=master;Integrated Security=true;TrustServerCertificate=true";
 
@@ -219,6 +285,10 @@ public sealed class InspectionApiTests
                     builder.ConfigureAppConfiguration((_, config) => config.AddInMemoryCollection(
                         new Dictionary<string, string?> { ["ConnectionStrings:BoardTrace"] = server.ConnectionString })));
                 server.Client = server.factory.CreateClient();
+                await server.SeedAsync();
+                await LoginAsync(server.Client, "station-a", "Test!Station1");
+                server.HumanClient = server.factory.CreateClient();
+                await LoginAsync(server.HumanClient, "operator", "Test!Operator1");
                 return server;
             }
             catch
@@ -226,6 +296,33 @@ public sealed class InspectionApiTests
                 await server.DisposeAsync();
                 throw;
             }
+        }
+
+        private async Task SeedAsync()
+        {
+            using var scope = factory!.Services.CreateScope();
+            var roles = scope.ServiceProvider.GetRequiredService<RoleManager<IdentityRole>>();
+            var users = scope.ServiceProvider.GetRequiredService<UserManager<BoardTraceUser>>();
+            foreach (var role in new[] { "Operator", "QualityEngineer", "Station" })
+                Assert.True((await roles.CreateAsync(new IdentityRole(role))).Succeeded);
+            foreach (var (id, name, role, station, password) in new[]
+            {
+                ("operator-test", "operator", "Operator", (string?)null, "Test!Operator1"),
+                ("quality-test", "quality", "QualityEngineer", (string?)null, "Test!Quality1"),
+                ("station-a-test", "station-a", "Station", "STATION-A", "Test!Station1"),
+                ("station-b-test", "station-b", "Station", "STATION-B", "Test!Station2")
+            })
+            {
+                var user = new BoardTraceUser { Id = id, UserName = name, DisplayName = name, StationId = station };
+                Assert.True((await users.CreateAsync(user, password)).Succeeded);
+                Assert.True((await users.AddToRoleAsync(user, role)).Succeeded);
+            }
+        }
+
+        public static async Task LoginAsync(HttpClient client, string userName, string password)
+        {
+            using var response = await client.PostAsJsonAsync("/api/auth/login", new LoginRequest(userName, password));
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         }
 
         public async Task ExecuteAsync(string sql)
@@ -253,6 +350,7 @@ public sealed class InspectionApiTests
         public async ValueTask DisposeAsync()
         {
             Client?.Dispose();
+            HumanClient?.Dispose();
             factory?.Dispose();
             // This instance can only remove the unique database name it generated itself.
             if (!name.StartsWith("BoardTrace_Integration_", StringComparison.Ordinal) ||
@@ -270,11 +368,15 @@ public sealed class InspectionApiTests
     private sealed class LoseFirstResponseHandler : DelegatingHandler
     {
         private bool first = true;
+        private string? cookie;
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
+            if (cookie is not null) request.Headers.TryAddWithoutValidation("Cookie", cookie);
             var response = await base.SendAsync(request, cancellationToken);
-            if (first)
+            if (response.Headers.TryGetValues("Set-Cookie", out var cookies))
+                cookie = cookies.First().Split(';')[0];
+            if (first && request.Method == HttpMethod.Put)
             {
                 first = false;
                 Assert.Equal(HttpMethod.Put, request.Method);
@@ -282,7 +384,7 @@ public sealed class InspectionApiTests
                 response.Dispose();
                 throw new HttpRequestException("Central SQL transaction committed; HTTP response lost.");
             }
-            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            if (request.Method == HttpMethod.Put) Assert.Equal(HttpStatusCode.OK, response.StatusCode);
             return response;
         }
     }

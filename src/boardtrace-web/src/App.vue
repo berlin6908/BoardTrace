@@ -1,81 +1,78 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, reactive, ref } from 'vue'
-import { ElAlert, ElButton, ElConfigProvider, ElDrawer, ElEmpty, ElIcon, ElInput, ElOption, ElPagination, ElSelect, ElSkeleton, ElTable, ElTableColumn, ElTag } from 'element-plus'
+import { onMounted, ref } from 'vue'
+import { ElAlert, ElButton, ElConfigProvider, ElIcon, ElInput, ElSkeleton, ElTag } from 'element-plus'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
-import { ArrowRight, Cpu, Refresh, Search } from '@element-plus/icons-vue'
-import InspectionDetail from './components/InspectionDetail.vue'
-import { listInspections, requestError } from './api'
-import { decisionLabels, executionLabels, formatMs, formatTime, sourceLabel } from './inspections'
-import type { Decision, InspectionPage } from './inspections'
+import { Cpu } from '@element-plus/icons-vue'
+import { ApiError, currentUser, login, logout, requestError, roleLabels } from './api'
+import type { CurrentUser } from './api'
+import TracePage from './TracePage.vue'
 
-const params = new URLSearchParams(window.location.search)
-const decision = params.get('decision') ?? ''
-const query = reactive({
-  stationId: params.get('stationId') ?? '',
-  productId: params.get('productId') ?? '',
-  decision: (['Pass', 'Fail', 'NotEvaluated'].includes(decision) ? decision : '') as Decision | '',
-  page: Math.max(1, Number(params.get('page')) || 1),
-  pageSize: 20,
-})
-const page = ref<InspectionPage | null>(null)
-const loading = ref(true)
-const error = ref('')
-const loadedAt = ref<string | null>(null)
-const selectedId = ref(params.get('inspection') ?? '')
-const drawerOpen = ref(Boolean(selectedId.value))
-let listRequest: AbortController | undefined
+const user = ref<CurrentUser | null>(null)
+const checkingSession = ref(true)
+const submitting = ref(false)
+const signingOut = ref(false)
+const userName = ref('')
+const password = ref('')
+const authError = ref('')
+const logoutError = ref('')
+const connectionFailed = ref(false)
 
-function updateUrl() {
-  const next = new URLSearchParams()
-  if (query.stationId) next.set('stationId', query.stationId)
-  if (query.productId) next.set('productId', query.productId)
-  if (query.decision) next.set('decision', query.decision)
-  if (query.page > 1) next.set('page', String(query.page))
-  if (drawerOpen.value && selectedId.value) next.set('inspection', selectedId.value)
-  window.history.replaceState(null, '', `${window.location.pathname}${next.size ? `?${next}` : ''}`)
+async function acceptUser(value: CurrentUser) {
+  if (!value.roles.some(role => role in roleLabels)) {
+    await logout()
+    throw new Error('该账号不能进入质量平台，请使用人员账号登录。')
+  }
+  user.value = value
 }
 
-async function load() {
-  listRequest?.abort()
-  const request = new AbortController()
-  listRequest = request
-  loading.value = true
-  error.value = ''
-  query.stationId = query.stationId.trim()
-  query.productId = query.productId.trim()
-  updateUrl()
-  try {
-    const response = await listInspections(query, request.signal)
-    if (request.signal.aborted) return
-    page.value = response
-    loadedAt.value = new Date().toISOString()
-  } catch (cause) {
-    if (!request.signal.aborted) error.value = requestError(cause)
+async function checkSession() {
+  checkingSession.value = true
+  authError.value = ''
+  connectionFailed.value = false
+  try { await acceptUser(await currentUser()) }
+  catch (cause) {
+    if (!(cause instanceof ApiError && cause.status === 401)) {
+      authError.value = requestError(cause)
+      connectionFailed.value = !(cause instanceof ApiError)
+    }
+  } finally { checkingSession.value = false }
+}
+
+async function signIn() {
+  if (submitting.value) return
+  submitting.value = true
+  authError.value = ''
+  connectionFailed.value = false
+  try { await acceptUser(await login(userName.value.trim(), password.value)) }
+  catch (cause) {
+    authError.value = cause instanceof ApiError && cause.status === 401 ? '账号或密码不正确，请重新输入。' : requestError(cause)
   } finally {
-    if (!request.signal.aborted) loading.value = false
+    password.value = ''
+    submitting.value = false
   }
 }
 
-function search() {
-  query.page = 1
-  void load()
+async function signOut() {
+  signingOut.value = true
+  logoutError.value = ''
+  try {
+    await logout()
+    user.value = null
+    authError.value = ''
+  } catch (cause) {
+    if (cause instanceof ApiError && cause.status === 401) sessionExpired()
+    else logoutError.value = `退出未完成：${requestError(cause)}`
+  } finally { signingOut.value = false }
 }
 
-function clearFilters() {
-  query.stationId = ''
-  query.productId = ''
-  query.decision = ''
-  search()
+function sessionExpired() {
+  user.value = null
+  password.value = ''
+  logoutError.value = ''
+  authError.value = '登录已失效，请重新登录。'
 }
 
-function openInspection(id: string) {
-  selectedId.value = id
-  drawerOpen.value = true
-  updateUrl()
-}
-
-onMounted(load)
-onBeforeUnmount(() => listRequest?.abort())
+onMounted(checkSession)
 </script>
 
 <template>
@@ -86,57 +83,32 @@ onBeforeUnmount(() => listRequest?.abort())
           <span class="brand-mark"><ElIcon :size="27"><Cpu /></ElIcon></span>
           <span><strong>BoardTrace</strong><small>PCB 视觉检测与质量追溯</small></span>
         </a>
-        <div class="workspace-label"><span class="mode-dot"></span>工业业务模拟</div>
-      </header>
-
-      <main class="workspace">
-        <div class="page-heading">
-          <div><p class="eyebrow">中央质量平台</p><h1>检测追溯</h1><p class="subtitle">查看工位检测档案与原始图像证据</p></div>
-          <ElButton :icon="Refresh" :loading="loading" @click="load">刷新记录</ElButton>
+        <div class="account-bar">
+          <div class="workspace-label"><span class="mode-dot"></span>工业业务模拟</div>
+          <template v-if="user">
+            <span class="account-name">{{ user.displayName }}</span>
+            <ElTag v-for="role in user.roles.filter(role => role in roleLabels)" :key="role" type="info">{{ roleLabels[role] }}</ElTag>
+            <ElButton :loading="signingOut" @click="signOut">退出登录</ElButton>
+          </template>
         </div>
-
-        <section class="records-panel" aria-label="检测记录">
-          <form class="filters" @submit.prevent="search">
-            <div class="filter-field"><label for="station-filter">工位编号</label><ElInput id="station-filter" v-model="query.stationId" placeholder="输入工位编号" clearable /></div>
-            <div class="filter-field product-filter"><label for="product-filter">产品编号</label><ElInput id="product-filter" v-model="query.productId" placeholder="输入产品编号" clearable /></div>
-            <div class="filter-field"><label for="decision-filter">质量判定</label><ElSelect id="decision-filter" v-model="query.decision" placeholder="全部判定" clearable><ElOption label="通过" value="Pass" /><ElOption label="缺陷" value="Fail" /><ElOption label="未判定" value="NotEvaluated" /></ElSelect></div>
-            <div class="filter-actions"><ElButton type="primary" native-type="submit" :icon="Search" :loading="loading">查询</ElButton><ElButton @click="clearFilters">重置</ElButton></div>
-          </form>
-
-          <div class="results-heading">
-            <h2>检测档案 <span v-if="page && !error" class="record-count">{{ page.total.toLocaleString() }}</span></h2>
-            <span v-if="loadedAt && !error" class="sync-caption">读取于 {{ formatTime(loadedAt) }} · 本地时区</span>
-          </div>
-
-          <div v-if="error" class="state-panel" role="alert">
-            <ElAlert title="未能读取检测记录" :description="error" type="error" show-icon :closable="false" />
-            <ElButton type="primary" :icon="Refresh" @click="load">重新连接</ElButton>
-          </div>
-          <div v-else-if="loading" class="list-loading" aria-live="polite" aria-busy="true"><span class="sr-only">正在读取检测记录</span><ElSkeleton :rows="7" animated /></div>
-          <ElEmpty v-else-if="!page?.items.length" :description="query.stationId || query.productId || query.decision ? '没有符合筛选条件的检测记录' : '中央尚未收到检测记录'">
-            <p class="empty-help">{{ query.stationId || query.productId || query.decision ? '可调整筛选条件后重新查询。' : '工位完成检测并同步后，档案会显示在这里。' }}</p>
-            <ElButton v-if="query.stationId || query.productId || query.decision" @click="clearFilters">清除筛选</ElButton>
-          </ElEmpty>
-          <ElTable v-else :data="page.items" row-key="id" class="inspection-table" :row-class-name="({ row }) => `decision-row-${row.decision}`">
-            <ElTableColumn label="产品 / 样本" min-width="195"><template #default="{ row }"><button class="record-link" @click="openInspection(row.id)">{{ row.productId }}<ElIcon><ArrowRight /></ElIcon></button><span class="secondary-line">样本 {{ row.sampleId }}</span></template></ElTableColumn>
-            <ElTableColumn label="开始时间" min-width="175"><template #default="{ row }"><span class="time-cell">{{ formatTime(row.startedAt) }}</span></template></ElTableColumn>
-            <ElTableColumn prop="stationId" label="工位" min-width="115" />
-            <ElTableColumn label="质量判定" min-width="125"><template #default="{ row }"><ElTag :type="row.decision === 'Pass' ? 'success' : row.decision === 'Fail' ? 'danger' : 'info'" effect="light" round>{{ decisionLabels[row.decision as Decision] }}</ElTag><span v-if="row.executionStatus !== 'Completed'" class="secondary-line">{{ executionLabels[row.executionStatus as keyof typeof executionLabels] }}</span></template></ElTableColumn>
-            <ElTableColumn prop="defectCount" label="缺陷区域" width="100" align="right" />
-            <ElTableColumn label="检测耗时" width="115" align="right"><template #default="{ row }"><span class="numeric">{{ formatMs(row.detectionMs) }}</span></template></ElTableColumn>
-            <ElTableColumn label="输入来源" min-width="185"><template #default="{ row }"><span :class="['source-label', { constructed: row.sourceKind === 'ConstructedNormal' }]">{{ sourceLabel(row.sourceKind) }}</span></template></ElTableColumn>
-            <ElTableColumn label="" width="80" fixed="right"><template #default="{ row }"><ElButton link type="primary" :aria-label="`查看 ${row.productId} 的检测档案`" @click="openInspection(row.id)">查看</ElButton></template></ElTableColumn>
-          </ElTable>
-
-          <div v-if="page && !error && page.total > 0" class="pagination-row"><span class="pagination-caption">按检测开始时间倒序</span><ElPagination v-model:current-page="query.page" :page-size="query.pageSize" :total="page.total" :disabled="loading" :pager-count="5" layout="prev, pager, next" background @current-change="load" /></div>
-        </section>
-
-        <footer class="page-footnote"><span class="footnote-mark">i</span>检测对象为单个 PCB 视野；回放与构造样例用于模拟验证，不能据此推算真实产线良率。</footer>
+      </header>
+      <main v-if="checkingSession" class="login-panel" aria-busy="true" aria-label="正在验证登录"><ElSkeleton :rows="4" animated /></main>
+      <main v-else-if="!user" class="login-panel">
+        <p class="eyebrow">中央质量平台</p>
+        <h1>登录 BoardTrace</h1>
+        <p class="subtitle">使用操作员、工艺或质量账号查看检测档案。</p>
+        <ElAlert v-if="authError" :title="authError" type="error" show-icon :closable="false" role="alert" />
+        <ElButton v-if="connectionFailed" @click="checkSession">重新连接</ElButton>
+        <form class="login-form" @submit.prevent="signIn">
+          <div class="filter-field"><label for="login-user">账号</label><ElInput id="login-user" v-model="userName" autocomplete="username" required maxlength="128" :disabled="submitting" placeholder="输入人员账号" /></div>
+          <div class="filter-field"><label for="login-password">密码</label><ElInput id="login-password" v-model="password" type="password" autocomplete="current-password" required :disabled="submitting" placeholder="输入密码" /></div>
+          <ElButton type="primary" native-type="submit" :loading="submitting">登录</ElButton>
+        </form>
       </main>
-
-      <ElDrawer v-model="drawerOpen" title="检测档案" class="inspection-drawer" size="min(1220px, 96vw)" destroy-on-close @closed="updateUrl">
-        <InspectionDetail v-if="drawerOpen && selectedId" :id="selectedId" />
-      </ElDrawer>
+      <template v-else>
+        <ElAlert v-if="logoutError" :title="logoutError" type="error" show-icon :closable="false" role="alert" />
+        <TracePage :key="user.id" @session-expired="sessionExpired" />
+      </template>
     </div>
   </ElConfigProvider>
 </template>

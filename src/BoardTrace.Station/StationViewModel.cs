@@ -35,7 +35,11 @@ public sealed class StationViewModel : ObservableObject, IAsyncDisposable
     private readonly LocalInspectionStore store;
     private readonly InspectionCoordinator coordinator;
     private readonly HttpClient uploadClient;
-    private readonly InspectionUploader uploader;
+    private InspectionUploader? uploader;
+    private HttpClient? operatorClient;
+    private CurrentUser? currentOperator;
+    private bool signingOut;
+    private bool sessionExpired;
     private readonly CancellationTokenSource uploadCancellation = new();
     private readonly SemaphoreSlim historyRefresh = new(1, 1);
     private Task? uploadTask;
@@ -56,15 +60,17 @@ public sealed class StationViewModel : ObservableObject, IAsyncDisposable
     private string uploadStatus = "等待同步";
     private string uploadNotice = "检测完成后自动上传。";
 
-    public StationViewModel(StationOptions options)
+    public StationViewModel(StationOptions options, CurrentUser user, HttpClient operatorClient)
     {
         this.options = options;
+        currentOperator = StationAuthentication.RequireOperator(user);
+        this.operatorClient = operatorClient;
         store = new LocalInspectionStore(options.DatabasePath);
         coordinator = new InspectionCoordinator(store, new ClassicalSettings());
-        uploadClient = new HttpClient { BaseAddress = options.ServerUrl, Timeout = TimeSpan.FromSeconds(10) };
-        uploader = new InspectionUploader(store, uploadClient);
+        uploadClient = StationAuthentication.CreateClient(options.ServerUrl);
         RunCommand = new AsyncRelayCommand(RunAsync, () => CanEdit && !coordinator.IsFaulted && SelectedSample != null && !string.IsNullOrWhiteSpace(ProductId));
         ViewHistoryCommand = new AsyncRelayCommand(ViewHistoryAsync, () => SelectedHistory != null && CanEdit);
+        SignOutCommand = new AsyncRelayCommand(SignOutAsync, () => currentOperator != null && !stopping && !signingOut);
         RunCommand.PropertyChanged += (_, e) =>
         {
             if (e.PropertyName != nameof(RunCommand.IsRunning)) return;
@@ -82,13 +88,16 @@ public sealed class StationViewModel : ObservableObject, IAsyncDisposable
     public string StationId => options.StationId;
     public string DatabasePath => options.DatabasePath;
     public string ServerAddress => options.ServerUrl.ToString();
-    public bool CanEdit => !stopping && ready && !RunCommand.IsRunning && !ViewHistoryCommand.IsRunning;
+    public string OperatorName => currentOperator?.DisplayName ?? "未登录";
+    public bool CanEdit => !stopping && !signingOut && !sessionExpired && currentOperator != null && ready && !RunCommand.IsRunning && !ViewHistoryCommand.IsRunning;
     public ObservableCollection<ReplaySample> Samples { get; } = [];
     public ObservableCollection<InspectionRow> History { get; } = [];
     public ObservableCollection<string> Events { get; } = [];
     public ObservableCollection<DefectOverlay> DefectOverlays { get; } = [];
     public AsyncRelayCommand RunCommand { get; }
     public AsyncRelayCommand ViewHistoryCommand { get; }
+    public AsyncRelayCommand SignOutCommand { get; }
+    public event EventHandler? LoginRequested;
 
     public ReplaySample? SelectedSample
     {
@@ -120,7 +129,7 @@ public sealed class StationViewModel : ObservableObject, IAsyncDisposable
     };
     public string DefectCount => current?.ExecutionStatus == InspectionExecution.Completed ? current.Defects.Count.ToString() : "—";
     public string DetectionTime => current?.DetectionMs is double ms ? $"{ms:F1} ms" : "—";
-    public string ResultCaption => current is null ? "尚未选择检测档案" : $"{current.ProductId} · 样本 {current.SampleId} · {(current.SourceKind == "ConstructedNormal" ? "构造正常输入" : "数据集回放")}";
+    public string ResultCaption => current is null ? "尚未选择检测档案" : $"{current.ProductId} · 样本 {current.SampleId} · {(current.SourceKind == "ConstructedNormal" ? "构造正常输入" : "数据集回放")} · 操作员 {current.OperatorName}";
     public string InspectionId => current?.Id.ToString() ?? "等待检测";
 
     public static string DecisionLabel(QualityDecision decision) => decision switch
@@ -142,11 +151,25 @@ public sealed class StationViewModel : ObservableObject, IAsyncDisposable
             SelectedSample = Samples.FirstOrDefault();
             await RefreshHistoryAsync();
             if (stopping) return;
+            try
+            {
+                var credentials = JsonSerializer.Deserialize<StationCredentials>(await File.ReadAllTextAsync(options.CredentialsPath), json);
+                if (credentials is null || string.IsNullOrWhiteSpace(credentials.UserName) || string.IsNullOrWhiteSpace(credentials.Password))
+                    throw new InvalidDataException("设备账号和密码不能为空。");
+                uploader = new InspectionUploader(store, uploadClient, credentials);
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or InvalidDataException)
+            {
+                UploadStatus = "设备凭据不可用";
+                UploadNotice = $"无法读取有效的设备账号。修正 {options.CredentialsPath} 后重启工位；待上传原件保留。";
+                AddEvent(UploadNotice);
+            }
+            if (stopping) return;
             ready = true;
             Status = "准备就绪";
             Notice = "选择输入并开始检测。当前为工程回放，不计入生产批次。";
             AddEvent($"工位已启动，载入 {Samples.Count} 个回放输入。");
-            uploadTask = UploadLoopAsync(uploadCancellation.Token);
+            if (uploader != null) uploadTask = UploadLoopAsync(uploadCancellation.Token);
         }
         catch (Exception error)
         {
@@ -160,17 +183,39 @@ public sealed class StationViewModel : ObservableObject, IAsyncDisposable
 
     private async Task RunAsync()
     {
-        if (stopping) return;
+        if (stopping || signingOut || sessionExpired || currentOperator is null || operatorClient is null) return;
         var sample = SelectedSample!;
         var product = ProductId.Trim();
         var source = new ReplayImageSource(options.DataRoot, sample, ConstructedNormal);
         SelectedHistory = null;
         ShowRecord(null);
+        CurrentUser actor;
+        try
+        {
+            actor = await StationAuthentication.CurrentOperatorAsync(operatorClient);
+            currentOperator = actor;
+            OnPropertyChanged(nameof(OperatorName));
+        }
+        catch (UnauthorizedAccessException error)
+        {
+            sessionExpired = true;
+            Status = "登录已失效 · 未接受检测";
+            Notice = error.Message + " 请点击退出 / 换班重新登录。";
+            NotifyAccessChanged();
+            return;
+        }
+        catch (Exception error) when (error is HttpRequestException or OperationCanceledException or JsonException)
+        {
+            Status = "无法验证人员登录 · 未接受检测";
+            Notice = "请检查中央连接后重试。工程回放需要在线验证人员身份。";
+            return;
+        }
+        if (stopping || signingOut) return;
         Notice = "正在处理，完成本地保存后显示判定。";
         InspectionRecord result;
         try
         {
-            result = await coordinator.InspectAsync(StationId, product, source, new Progress<string>(stage => Status = stage));
+            result = await coordinator.InspectAsync(StationId, product, actor, source, new Progress<string>(stage => Status = stage));
         }
         catch (Exception error)
         {
@@ -215,7 +260,7 @@ public sealed class StationViewModel : ObservableObject, IAsyncDisposable
                 var delay = TimeSpan.FromSeconds(5);
                 try
                 {
-                    var result = await uploader.UploadPendingAsync(cancellationToken: cancellationToken);
+                    var result = await uploader!.UploadPendingAsync(cancellationToken: cancellationToken);
                     var previousNotice = UploadNotice;
                     switch (result.Connection)
                     {
@@ -255,23 +300,82 @@ public sealed class StationViewModel : ObservableObject, IAsyncDisposable
 
     public ValueTask DisposeAsync() => new(shutdownTask ??= ShutdownAsync());
 
-    private async Task ShutdownAsync()
+    public void SignIn(CurrentUser user, HttpClient client)
     {
-        stopping = true;
+        if (stopping || signingOut || currentOperator != null) throw new InvalidOperationException("工位当前不能切换登录。");
+        currentOperator = StationAuthentication.RequireOperator(user);
+        operatorClient = client;
+        sessionExpired = false;
+        Status = "准备就绪";
+        Notice = "人员已登录，可以开始工程回放。";
+        AddEvent($"操作员 {user.DisplayName} 已登录。");
+        NotifyAccessChanged();
+    }
+
+    private async Task SignOutAsync()
+    {
+        signingOut = true;
+        NotifyAccessChanged();
+        Notice = "正在换班，等待已接受的操作保存完成…";
+        await Task.WhenAll(RunCommand.ExecutionTask ?? Task.CompletedTask, ViewHistoryCommand.ExecutionTask ?? Task.CompletedTask);
+        var actorName = currentOperator?.DisplayName;
+        try
+        {
+            if (operatorClient != null)
+            {
+                using var response = await operatorClient.PostAsync("api/auth/logout", null);
+                response.EnsureSuccessStatusCode();
+            }
+        }
+        catch (Exception error) when (error is HttpRequestException or OperationCanceledException)
+        {
+            AddEvent("中央未确认注销；本机人员会话已清除，下次登录重新鉴别。");
+        }
+        finally
+        {
+            operatorClient?.Dispose();
+            operatorClient = null;
+            currentOperator = null;
+            signingOut = false;
+            sessionExpired = false;
+            ShowRecord(null);
+            if (!stopping)
+            {
+                Status = "人员已退出";
+                Notice = "等待下一位操作员登录，设备补传继续运行。";
+            }
+            AddEvent($"操作员 {actorName} 已退出，设备补传继续运行。");
+            NotifyAccessChanged();
+        }
+        if (!stopping) LoginRequested?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void NotifyAccessChanged()
+    {
+        OnPropertyChanged(nameof(OperatorName));
         OnPropertyChanged(nameof(CanEdit));
         RunCommand.NotifyCanExecuteChanged();
         ViewHistoryCommand.NotifyCanExecuteChanged();
+        SignOutCommand.NotifyCanExecuteChanged();
+    }
+
+    private async Task ShutdownAsync()
+    {
+        stopping = true;
+        NotifyAccessChanged();
         Notice = "正在关闭，等待已接受的操作保存完成…";
         try
         {
             await uploadCancellation.CancelAsync();
             if (initializationTask != null) await initializationTask;
-            await Task.WhenAll(RunCommand.ExecutionTask ?? Task.CompletedTask, ViewHistoryCommand.ExecutionTask ?? Task.CompletedTask);
+            await Task.WhenAll(RunCommand.ExecutionTask ?? Task.CompletedTask, ViewHistoryCommand.ExecutionTask ?? Task.CompletedTask,
+                SignOutCommand.ExecutionTask ?? Task.CompletedTask);
             if (uploadTask != null) await uploadTask;
         }
         finally
         {
             uploadClient.Dispose();
+            operatorClient?.Dispose();
             uploadCancellation.Dispose();
             historyRefresh.Dispose();
         }
@@ -279,7 +383,7 @@ public sealed class StationViewModel : ObservableObject, IAsyncDisposable
 
     private async Task ViewHistoryAsync()
     {
-        if (stopping) return;
+        if (stopping || signingOut || sessionExpired || currentOperator is null) return;
         var id = SelectedHistory!.Id;
         try
         {

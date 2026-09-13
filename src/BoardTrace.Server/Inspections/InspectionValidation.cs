@@ -11,7 +11,8 @@ public static class InspectionValidation
         foreach (var (value, limit, name) in new[]
         {
             (record.StationId, 128, "工位"), (record.ProductId, 128, "产品"),
-            (record.SampleId, 128, "输入样本"), (record.SourceKind, 32, "采集来源"), (record.RecipeId, 128, "方案版本")
+            (record.SampleId, 128, "输入样本"), (record.SourceKind, 32, "采集来源"), (record.RecipeId, 128, "方案版本"),
+            (record.OperatorId, 450, "操作员编号"), (record.OperatorName, 128, "操作员姓名")
         })
             if (string.IsNullOrWhiteSpace(value) || value.Length > limit) return $"{name}不能为空且不能超过 {limit} 字符。";
         if (record.CompletedAt is null || !Enum.IsDefined(record.ExecutionStatus) || record.ExecutionStatus == InspectionExecution.Started)

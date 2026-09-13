@@ -1,8 +1,12 @@
 using System.Diagnostics;
 using System.IO;
+using System.Net;
+using System.Net.Http;
+using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
@@ -15,12 +19,18 @@ namespace BoardTrace.Station.Smoke;
 
 public static class Program
 {
+    private static readonly CurrentUser OfflineOperator = new("smoke-operator", "smoke-operator", "测试操作员", ["Operator"], null);
+
     [STAThread]
     public static int Main(string[] args)
     {
-        var server = args.Length == 0 ? null : args.Length == 2 && args[0] == "--server"
-            ? new Uri(args[1].TrimEnd('/') + "/", UriKind.Absolute)
-            : throw new ArgumentException("Supported option: --server <HTTP URL>.");
+        var arguments = new Dictionary<string, string>();
+        for (var index = 0; index < args.Length; index += 2)
+        {
+            if (index + 1 >= args.Length || args[index] is not ("--server" or "--station" or "--credentials" or "--development-accounts"))
+                throw new ArgumentException("Supported options: --server, --station, --credentials, --development-accounts.");
+            arguments.Add(args[index], args[index + 1]);
+        }
         var output = Path.GetFullPath($"artifacts/station/{DateTime.UtcNow:yyyyMMdd-HHmmss}");
         Directory.CreateDirectory(output);
         using var bindingLog = new TextWriterTraceListener(Path.Combine(output, "binding-errors.log"));
@@ -33,7 +43,7 @@ public static class Program
         {
             try
             {
-                await RunAsync(output, server);
+                await RunAsync(output, arguments);
                 bindingLog.Flush();
                 if (new FileInfo(Path.Combine(output, "binding-errors.log")).Length != 0)
                     throw new InvalidOperationException("WPF binding errors were recorded.");
@@ -55,11 +65,19 @@ public static class Program
         return exitCode;
     }
 
-    private static async Task RunAsync(string output, Uri? server)
+    private static async Task RunAsync(string output, Dictionary<string, string> arguments)
     {
+        using (var previewClient = StationAuthentication.CreateClient(new Uri("http://127.0.0.1:1/")))
+        {
+            var preview = new LoginWindow(previewClient, "STATION-01");
+            preview.Show();
+            await SnapshotAsync(preview, Path.Combine(output, "00-operator-login.png"));
+            preview.Close();
+        }
         var options = new StationOptions("T05-SMOKE", Path.GetFullPath("data"),
-            Path.GetFullPath("training/manifests/inputs/validation.jsonl"), Path.Combine(output, "station.db"), new Uri("http://127.0.0.1:1/"));
-        await using var model = new StationViewModel(options);
+            Path.GetFullPath("training/manifests/inputs/validation.jsonl"), Path.Combine(output, "station.db"), new Uri("http://127.0.0.1:1/"), Path.Combine(output, "offline-device.json"));
+        File.WriteAllText(options.CredentialsPath, JsonSerializer.Serialize(new StationCredentials("offline-test-device", "unused-test-password")));
+        await using var model = OfflineModel(options);
         var window = new MainWindow { DataContext = model };
         window.Show();
         await model.InitializeAsync();
@@ -80,10 +98,16 @@ public static class Program
         Require(model.SelectedHistory is null, "An old history selection remained attached to the new result.");
         var normalId = Guid.Parse(model.InspectionId);
         var timeout = Stopwatch.StartNew();
-        while (model.UploadStatus != "中央暂不可达" && timeout.Elapsed < TimeSpan.FromSeconds(15))
+        // Allow more than one 5-second background interval plus the 10-second HTTP timeout.
+        while (model.UploadStatus != "中央暂不可达" && timeout.Elapsed < TimeSpan.FromSeconds(30))
             await Task.Delay(100);
+        File.WriteAllText(Path.Combine(output, "offline-upload-observation.json"), JsonSerializer.Serialize(new
+        {
+            observedAt = DateTimeOffset.UtcNow, waitedSeconds = timeout.Elapsed.TotalSeconds,
+            model.UploadStatus, model.UploadNotice, model.PendingCount, canRun = model.RunCommand.CanExecute(null)
+        }));
         Require(model.UploadStatus == "中央暂不可达" && model.PendingCount == 2 && model.RunCommand.CanExecute(null),
-            "An unavailable central server did not preserve pending records and engineering replay availability.");
+            $"Unavailable central observation: {model.UploadStatus}; pending={model.PendingCount}; canRun={model.RunCommand.CanExecute(null)}; {model.UploadNotice}");
         await SnapshotAsync(window, Path.Combine(output, "03-controlled-normal.png"));
 
         model.SelectedHistory = model.History.Single(row => row.Id == defectId);
@@ -130,13 +154,42 @@ public static class Program
         await VerifyCloseWhileInspectingAsync(output, options);
         await VerifyCloseWhileReadingAsync(output, options);
         await VerifyCloseDuringInitializationAsync(output, options);
-        if (server != null) await VerifyUploadedHistoryAsync(output, options with { ServerUrl = server });
+        await VerifySessionAndShiftAsync(output, options);
+        if (arguments.TryGetValue("--server", out var server))
+        {
+            var station = arguments.GetValueOrDefault("--station", "STATION-01");
+            await VerifyUploadedHistoryAsync(output, options with
+            {
+                ServerUrl = new Uri(server.TrimEnd('/') + "/"), StationId = station,
+                CredentialsPath = Path.GetFullPath(arguments.GetValueOrDefault("--credentials", $".local/stations/{station}.json"))
+            }, arguments.GetValueOrDefault("--development-accounts", ".local/development-accounts.json"));
+        }
     }
 
-    private static async Task VerifyUploadedHistoryAsync(string output, StationOptions defaults)
+    private static async Task VerifyUploadedHistoryAsync(string output, StationOptions defaults, string developmentAccounts)
     {
-        var options = defaults with { StationId = "T06-UI-" + Guid.NewGuid().ToString("N")[..8], DatabasePath = Path.Combine(output, "central-sync.db") };
-        await using var model = new StationViewModel(options);
+        var options = defaults with { DatabasePath = Path.Combine(output, "central-sync.db") };
+        using var operatorClient = StationAuthentication.CreateClient(options.ServerUrl);
+        var passwords = JsonSerializer.Deserialize<Dictionary<string, string>>(await File.ReadAllTextAsync(developmentAccounts))
+            ?? throw new InvalidDataException("No development operator login was found.");
+        var request = new LoginRequest("operator", passwords["operator"]);
+        var login = new LoginWindow(operatorClient, options.StationId);
+        var loginTimeout = new DispatcherTimer { Interval = TimeSpan.FromSeconds(20) };
+        loginTimeout.Tick += (_, _) => login.Close();
+        _ = login.Dispatcher.InvokeAsync(async () =>
+        {
+            ((TextBox)login.FindName("UserNameInput")).Text = request.UserName;
+            await SnapshotAsync(login, Path.Combine(output, "00-operator-login.png"));
+            ((PasswordBox)login.FindName("PasswordInput")).Password = request.Password;
+            ((Button)login.FindName("LoginButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        }, DispatcherPriority.Loaded);
+        bool? loggedIn;
+        try { loginTimeout.Start(); loggedIn = login.ShowDialog(); }
+        finally { loginTimeout.Stop(); }
+        Require(loggedIn == true && login.AuthenticatedUser != null && ((PasswordBox)login.FindName("PasswordInput")).Password.Length == 0,
+            "Actual operator login failed or PasswordBox was not cleared.");
+        var user = login.AuthenticatedUser!;
+        await using var model = new StationViewModel(options, user, operatorClient);
         var window = new MainWindow { DataContext = model };
         window.Show();
         await model.InitializeAsync();
@@ -169,6 +222,24 @@ public static class Program
         var rows = store.ReadRecent();
         Require(rows.Count == 3 && rows.All(row => row.AcknowledgedAt != null) && store.PendingCount() == 0,
             "Three actual inspections were not confirmed by the central service.");
+        Require(rows.All(row => row.Record.OperatorId == user.Id && row.Record.OperatorName == user.DisplayName),
+            "Archived operator attribution does not match the authenticated person.");
+        var centralChecks = new List<object>();
+        foreach (var row in rows)
+        {
+            var original = store.Get(row.Record.Id)!;
+            using var detail = await operatorClient.GetFromJsonAsync<JsonDocument>($"api/inspections/{original.Id}")
+                ?? throw new InvalidDataException("Central detail response was empty.");
+            var central = detail.RootElement.GetProperty("inspection").Deserialize<InspectionRecord>(new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+            var tested = await operatorClient.GetByteArrayAsync($"api/inspections/{original.Id}/images/tested");
+            var reference = await operatorClient.GetByteArrayAsync($"api/inspections/{original.Id}/images/reference");
+            var contentHash = detail.RootElement.GetProperty("contentHash").GetString();
+            Require(contentHash == InspectionTransfer.Hash(original) && tested.SequenceEqual(original.TestedImage!) &&
+                    reference.SequenceEqual(original.ReferenceImage!) &&
+                    InspectionTransfer.Hash(central with { TestedImage = tested, ReferenceImage = reference }) == contentHash,
+                "Personnel API read did not match the local immutable document, operator attribution or image bytes.");
+            centralChecks.Add(new { original.Id, original.OperatorId, contentHash, testedBytes = tested.Length, referenceBytes = reference.Length });
+        }
         Require(model.History.Select(row => row.Id).SequenceEqual(rows.Select(row => row.Record.Id)) && model.PendingCount == 0 &&
                 model.History.All(row => !row.Stored.PendingUpload),
             "Overlapping upload/detection refreshes replaced current history with a stale snapshot.");
@@ -180,16 +251,93 @@ public static class Program
         {
             completedAt = DateTimeOffset.UtcNow, options.StationId, server = options.ServerUrl,
             inspectionIds = rows.Select(row => row.Record.Id), selectedInspection = model.SelectedHistory?.Id,
-            pendingUploads = store.PendingCount(),
-            checks = new[] { "real central acknowledgments", "upload and inspection refresh overlap", "latest three records retained", "selected history retained", "original defect image and overlay retained" }
+            pendingUploads = store.PendingCount(), operatorId = user.Id, operatorName = user.DisplayName, centralChecks,
+            checks = new[] { "real PasswordBox login", "password cleared", "authenticated operator attribution", "real device login and central acknowledgments", "personnel API reads match full documents and image bytes", "upload and inspection refresh overlap", "latest three records retained", "selected history retained", "original defect image and overlay retained" }
         }, new JsonSerializerOptions(JsonSerializerDefaults.Web) { WriteIndented = true }));
+        model.ProductId = "SIM-UPLOAD-AFTER-PERSONNEL-LOGOUT";
+        await model.RunCommand.ExecuteAsync(null);
+        var afterLogoutId = Guid.Parse(model.InspectionId);
+        await model.SignOutCommand.ExecuteAsync(null);
+        timeout.Restart();
+        while (model.PendingCount != 0 && timeout.Elapsed < TimeSpan.FromSeconds(30)) await Task.Delay(100);
+        var afterLogout = store.Get(afterLogoutId)!;
+        Require(model.OperatorName == "未登录" && !model.RunCommand.CanExecute(null) && store.PendingCount() == 0 &&
+                store.ReadRecent().Single(row => row.Record.Id == afterLogoutId).AcknowledgedAt != null,
+            "Device upload did not finish independently after personnel sign-out.");
+        Require(afterLogout.OperatorId == user.Id && afterLogout.OperatorName == user.DisplayName,
+            "Personnel sign-out changed the archived operator attribution.");
+        await SnapshotAsync(window, Path.Combine(output, "06-signedout-synced.png"));
+        File.WriteAllText(Path.Combine(output, "signedout-upload.json"), JsonSerializer.Serialize(new
+        {
+            completedAt = DateTimeOffset.UtcNow, afterLogoutId, afterLogout.OperatorId, afterLogout.OperatorName,
+            pendingUploads = store.PendingCount(),
+            checks = new[] { "personnel cookie signed out", "new inspections disabled", "device upload continues without personnel session", "original attribution retained" }
+        }));
+        window.Close();
+    }
+
+    private static async Task VerifySessionAndShiftAsync(string output, StationOptions defaults)
+    {
+        var options = defaults with { DatabasePath = Path.Combine(output, "session-shift.db") };
+        var expired = new OperatorHandler(OfflineOperator) { MeStatus = HttpStatusCode.Unauthorized };
+        await using var model = new StationViewModel(options, OfflineOperator, PersonnelClient(expired));
+        var window = new MainWindow { DataContext = model };
+        window.Show();
+        await model.InitializeAsync();
+        var store = new LocalInspectionStore(options.DatabasePath);
+        await model.RunCommand.ExecuteAsync(null);
+        Require(store.ReadRecent().Count == 0 && !model.RunCommand.CanExecute(null) && model.SignOutCommand.CanExecute(null),
+            "Expired personnel login created an attempt or still accepts new inspections.");
+        await model.SignOutCommand.ExecuteAsync(null);
+        Require(!model.CanEdit, "An unauthenticated station still accepts commands.");
+        await SnapshotAsync(window, Path.Combine(output, "07-personnel-signedout.png"));
+
+        var nextOperator = OfflineOperator with { Id = "smoke-operator-two", DisplayName = "第二位测试操作员" };
+        var nextHandler = new OperatorHandler(nextOperator) { Disconnected = true };
+        model.SignIn(nextOperator, PersonnelClient(nextHandler));
+        await model.RunCommand.ExecuteAsync(null);
+        Require(store.ReadRecent().Count == 0, "Personnel authentication network failure left a Started record behind.");
+        nextHandler.Disconnected = false;
+        model.ConstructedNormal = true;
+        model.ProductId = "SIM-BEFORE-SHIFT";
+        await model.RunCommand.ExecuteAsync(null);
+        var beforeShiftId = Guid.Parse(model.InspectionId);
+        using (var connection = new SqliteConnection($"Data Source={options.DatabasePath}"))
+        {
+            connection.Open();
+            using var writerLock = connection.BeginTransaction();
+            model.ProductId = "SIM-SHIFT-WHILE-ACCEPTED";
+            var inspection = model.RunCommand.ExecuteAsync(null);
+            var acceptedTimeout = Stopwatch.StartNew();
+            while (model.Notice != "正在处理，完成本地保存后显示判定。" && !inspection.IsCompleted && acceptedTimeout.Elapsed < TimeSpan.FromSeconds(2))
+                await Task.Delay(10);
+            var signingOut = model.SignOutCommand.ExecuteAsync(null);
+            try
+            {
+                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                Require(!signingOut.IsCompleted && !model.CanEdit, "Personnel sign-out interrupted an accepted inspection.");
+            }
+            finally { writerLock.Rollback(); }
+            await signingOut;
+            Require(inspection.IsCompletedSuccessfully && store.ReadRecent().Count == 2, "Shift change lost an accepted inspection.");
+        }
+        model.SignIn(OfflineOperator, OfflineOperatorClient(OfflineOperator));
+        model.ProductId = "SIM-AFTER-SHIFT";
+        await model.RunCommand.ExecuteAsync(null);
+        Require(store.Get(beforeShiftId)!.OperatorId == nextOperator.Id && store.Get(Guid.Parse(model.InspectionId))!.OperatorId == OfflineOperator.Id,
+            "New personnel identity rewrote an earlier inspection attribution.");
+        File.WriteAllText(Path.Combine(output, "session-shift.json"), JsonSerializer.Serialize(new
+        {
+            completedAt = DateTimeOffset.UtcNow, attempts = store.ReadRecent().Count,
+            checks = new[] { "401 before acceptance leaves no record", "network failure before acceptance leaves no record", "sign-out disables new commands", "shift waits for accepted inspection commit", "new operator cannot overwrite previous attribution" }
+        }));
         window.Close();
     }
 
     private static async Task VerifyCloseWhileInspectingAsync(string output, StationOptions defaults)
     {
         var options = defaults with { DatabasePath = Path.Combine(output, "closing-inspection.db") };
-        await using var model = new StationViewModel(options);
+        await using var model = OfflineModel(options);
         var window = new MainWindow { DataContext = model };
         var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         window.Closed += (_, _) => closed.TrySetResult();
@@ -230,7 +378,7 @@ public static class Program
 
     private static async Task VerifyCloseDuringInitializationAsync(string output, StationOptions defaults)
     {
-        await using var model = new StationViewModel(defaults with { DatabasePath = Path.Combine(output, "closing-initialization.db") });
+        await using var model = OfflineModel(defaults with { DatabasePath = Path.Combine(output, "closing-initialization.db") });
         var window = new MainWindow { DataContext = model };
         var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         window.Closed += (_, _) => closed.TrySetResult();
@@ -247,7 +395,7 @@ public static class Program
         }));
 
         var unopened = defaults with { DatabasePath = Path.Combine(output, "never-started.db") };
-        await using var stoppedModel = new StationViewModel(unopened);
+        await using var stoppedModel = OfflineModel(unopened);
         await stoppedModel.DisposeAsync();
         await stoppedModel.InitializeAsync();
         Require(!File.Exists(unopened.DatabasePath) && !stoppedModel.CanEdit,
@@ -256,7 +404,7 @@ public static class Program
 
     private static async Task VerifyCloseWhileReadingAsync(string output, StationOptions defaults)
     {
-        await using var model = new StationViewModel(defaults with { DatabasePath = Path.Combine(output, "closing-inspection.db") });
+        await using var model = OfflineModel(defaults with { DatabasePath = Path.Combine(output, "closing-inspection.db") });
         var window = new MainWindow { DataContext = model };
         var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         window.Closed += (_, _) => closed.TrySetResult();
@@ -291,5 +439,28 @@ public static class Program
     private static void Require(bool condition, string message)
     {
         if (!condition) throw new InvalidOperationException(message);
+    }
+
+    private static StationViewModel OfflineModel(StationOptions options) => new(options, OfflineOperator, OfflineOperatorClient(OfflineOperator));
+
+    private static HttpClient OfflineOperatorClient(CurrentUser user) => PersonnelClient(new OperatorHandler(user));
+    private static HttpClient PersonnelClient(HttpMessageHandler handler) => new(handler) { BaseAddress = new Uri("http://offline-personnel-test/") };
+
+    // Explicit personnel fixture for local image/storage rendering tests. Actual App and live smoke use the login endpoint.
+    private sealed class OperatorHandler(CurrentUser user) : HttpMessageHandler
+    {
+        public HttpStatusCode MeStatus { get; set; } = HttpStatusCode.OK;
+        public bool Disconnected { get; set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if (Disconnected) throw new HttpRequestException("Simulated personnel connection loss.");
+            return Task.FromResult(request.RequestUri!.AbsolutePath switch
+            {
+                "/api/auth/me" => new HttpResponseMessage(MeStatus) { Content = JsonContent.Create(user) },
+                "/api/auth/logout" => new HttpResponseMessage(HttpStatusCode.NoContent),
+                _ => throw new InvalidOperationException("The offline personnel fixture only supports me/logout.")
+            });
+        }
     }
 }
