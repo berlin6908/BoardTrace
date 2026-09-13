@@ -9,11 +9,10 @@
 #SBATCH --time=12:00:00
 #SBATCH --output=artifacts/training/hpi-train-%j.log
 set -euo pipefail
-cd "${SLURM_SUBMIT_DIR}"
-export TORCH_HOME="$PWD/data/torch"
-export PYTHONUNBUFFERED=1
-export OMP_NUM_THREADS=4
-nvidia-smi
-sha256sum training/train.py training/model.py training/dataset.py training/detection_evaluation.py training/train-config.json
-# Extra arguments may select an output directory and --resume; no test split is accepted.
-.venv/bin/python training/train.py "$@"
+# Arguments: immutable bundle directory, shared training output, then trainer options.
+bundle_dir=$(realpath "$1")
+output_dir=$(realpath -m "$2")
+shift 2
+source "$bundle_dir/hpi-node-environment.sh" "$bundle_dir"
+sha256sum training/train-config.json training/evaluation-config.json
+"$BOARDTRACE_PYTHON" training/train.py --device cuda --output "$output_dir" "$@"
