@@ -1,0 +1,14 @@
+{
+  "seed": 20260913,
+  "epochs": 30,
+  "batchSize": 2,
+  "workers": 2,
+  "threads": 4,
+  "learningRate": 0.002,
+  "momentum": 0.9,
+  "weightDecay": 0.0005,
+  "lrMilestones": [18, 25],
+  "lrGamma": 0.1,
+  "horizontalFlipProbability": 0.5,
+  "verticalFlipProbability": 0.5
+}
