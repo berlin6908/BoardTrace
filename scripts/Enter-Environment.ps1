@@ -1,0 +1,9 @@
+$ErrorActionPreference = 'Stop'
+$boardtraceRoot = Split-Path $PSScriptRoot -Parent
+$env:DOTNET_ROOT = Join-Path $boardtraceRoot '.local/dotnet'
+$env:PATH = "$env:DOTNET_ROOT;$(Join-Path $boardtraceRoot '.venv/Scripts');$env:PATH"
+$env:DOTNET_CLI_TELEMETRY_OPTOUT = '1'
+$env:DOTNET_NOLOGO = '1'
+$env:TORCH_HOME = Join-Path $boardtraceRoot 'data/torch'
+$env:PYTHONUTF8 = '1'
+$env:PYTHONIOENCODING = 'utf-8'

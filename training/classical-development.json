@@ -1,0 +1,9 @@
+{
+  "binarizationThreshold": 127,
+  "edgeTolerance": 1,
+  "minimumArea": 8,
+  "closingSize": 3,
+  "boxPadding": 10,
+  "maximumTranslation": 12,
+  "minimumAlignmentResponse": 0.1
+}

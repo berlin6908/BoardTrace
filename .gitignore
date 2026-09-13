@@ -1,0 +1,39 @@
+# Local data, downloaded models, reports and runtime databases
+/docs/
+/tasks/
+/AGENTS.md
+/README.md
+/training/manifests/dataset-audit.json
+/data/
+/artifacts/
+/.local/
+*.db
+*.db-shm
+*.db-wal
+*.mdf
+*.ldf
+
+# .NET
+**/bin/
+**/obj/
+.vs/
+TestResults/
+
+# Frontend
+**/node_modules/
+**/dist/
+
+# Python
+.venv/
+**/.venv/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local settings and credentials
+.env
+.env.*
+!.env.example
+appsettings.Local.json
+*.user
+*.suo
