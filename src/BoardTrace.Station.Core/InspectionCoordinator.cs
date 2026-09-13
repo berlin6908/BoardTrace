@@ -10,18 +10,52 @@ namespace BoardTrace.Station.Core;
 public sealed class InspectionCoordinator
 {
     private readonly LocalInspectionStore store;
-    private readonly ClassicalDetector detector;
-    private readonly string recipeJson;
-    private readonly string recipeId;
+    private ClassicalDetector? developmentDetector;
+    private LoadedClassicalRecipe? publishedRecipe;
+    private string recipeJson = "";
+    private string recipeId = "";
     private int busy;
     private volatile bool faulted;
 
     public InspectionCoordinator(LocalInspectionStore store, ClassicalSettings settings)
     {
         this.store = store;
-        detector = new ClassicalDetector(settings);
+        SetDevelopmentRecipe(settings);
+    }
+
+    private void SetDevelopmentRecipe(ClassicalSettings settings)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        developmentDetector = new ClassicalDetector(settings);
+        publishedRecipe = null;
         recipeJson = JsonSerializer.Serialize(settings, new JsonSerializerOptions(JsonSerializerDefaults.Web));
         recipeId = "classical-" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(recipeJson)));
+    }
+
+    public void UseDevelopmentRecipe(ClassicalSettings settings) => ChangeRecipe(() => SetDevelopmentRecipe(settings));
+
+    public void UsePublishedRecipe(LoadedClassicalRecipe recipe)
+    {
+        ArgumentNullException.ThrowIfNull(recipe);
+        ChangeRecipe(() =>
+        {
+            publishedRecipe = recipe;
+            developmentDetector = null;
+            recipeId = recipe.VersionId.ToString("D");
+            recipeJson = recipe.RecipeJson;
+        });
+    }
+
+    private void ChangeRecipe(Action change)
+    {
+        if (Interlocked.CompareExchange(ref busy, 1, 0) != 0)
+            throw new InvalidOperationException("工位忙，不能切换检测方案。");
+        try
+        {
+            if (faulted) throw new InvalidOperationException("本地保存失败，工位已停止接件，不能通过切换方案恢复。");
+            change();
+        }
+        finally { Interlocked.Exchange(ref busy, 0); }
     }
 
     public bool IsFaulted => faulted;
@@ -54,9 +88,15 @@ public sealed class InspectionCoordinator
                 {
                     progress?.Report("正在采集图像");
                     var pair = await source.CaptureAsync(cancellationToken);
-                    record = record with { TestedImage = pair.Tested, ReferenceImage = pair.Reference };
+                    record = record with { TestedImage = pair.Tested };
+                    var reference = publishedRecipe is not null
+                        ? publishedRecipe.GetReferenceBytes(source.SampleId)
+                        : pair.Reference ?? throw new InvalidDataException("工程回放必须提供参考图，当前未加载已发布方案。");
+                    record = record with { ReferenceImage = reference };
                     progress?.Report("正在检测");
-                    var result = detector.Detect(pair.Tested, pair.Reference, cancellationToken);
+                    var result = publishedRecipe is not null
+                        ? publishedRecipe.Detect(source.SampleId, pair.Tested, cancellationToken)
+                        : developmentDetector!.Detect(pair.Tested, reference, cancellationToken);
                     record = record with
                     {
                         ExecutionStatus = InspectionExecution.Completed,

@@ -29,7 +29,7 @@ public sealed record InspectionRow(StoredInspection Stored)
     public string Upload => Stored.PendingUpload ? "待上传" : Stored.AcknowledgedAt is not null ? "已确认" : "未生成结果";
 }
 
-public sealed class StationViewModel : ObservableObject, IAsyncDisposable
+public sealed partial class StationViewModel : ObservableObject, IAsyncDisposable
 {
     private readonly StationOptions options;
     private readonly LocalInspectionStore store;
@@ -71,17 +71,20 @@ public sealed class StationViewModel : ObservableObject, IAsyncDisposable
         RunCommand = new AsyncRelayCommand(RunAsync, () => CanEdit && !coordinator.IsFaulted && SelectedSample != null && !string.IsNullOrWhiteSpace(ProductId));
         ViewHistoryCommand = new AsyncRelayCommand(ViewHistoryAsync, () => SelectedHistory != null && CanEdit);
         SignOutCommand = new AsyncRelayCommand(SignOutAsync, () => currentOperator != null && !stopping && !signingOut);
+        InitializeRecipeCommands();
         RunCommand.PropertyChanged += (_, e) =>
         {
             if (e.PropertyName != nameof(RunCommand.IsRunning)) return;
             OnPropertyChanged(nameof(CanEdit));
             ViewHistoryCommand.NotifyCanExecuteChanged();
+            NotifyRecipeCommands();
         };
         ViewHistoryCommand.PropertyChanged += (_, e) =>
         {
             if (e.PropertyName != nameof(ViewHistoryCommand.IsRunning)) return;
             OnPropertyChanged(nameof(CanEdit));
             RunCommand.NotifyCanExecuteChanged();
+            NotifyRecipeCommands();
         };
     }
 
@@ -89,7 +92,7 @@ public sealed class StationViewModel : ObservableObject, IAsyncDisposable
     public string DatabasePath => options.DatabasePath;
     public string ServerAddress => options.ServerUrl.ToString();
     public string OperatorName => currentOperator?.DisplayName ?? "未登录";
-    public bool CanEdit => !stopping && !signingOut && !sessionExpired && currentOperator != null && ready && !RunCommand.IsRunning && !ViewHistoryCommand.IsRunning;
+    public bool CanEdit => !stopping && !signingOut && !sessionExpired && currentOperator != null && ready && !RunCommand.IsRunning && !ViewHistoryCommand.IsRunning && !IsRecipeBusy;
     public ObservableCollection<ReplaySample> Samples { get; } = [];
     public ObservableCollection<InspectionRow> History { get; } = [];
     public ObservableCollection<string> Events { get; } = [];
@@ -147,8 +150,10 @@ public sealed class StationViewModel : ObservableObject, IAsyncDisposable
             var lines = await File.ReadAllLinesAsync(options.ManifestPath);
             var json = new JsonSerializerOptions(JsonSerializerDefaults.Web);
             foreach (var line in lines.Where(l => !string.IsNullOrWhiteSpace(l)))
-                Samples.Add(JsonSerializer.Deserialize<ReplaySample>(line, json) ?? throw new InvalidDataException("回放清单包含空记录。"));
+                replaySamples.Add(JsonSerializer.Deserialize<ReplaySample>(line, json) ?? throw new InvalidDataException("回放清单包含空记录。"));
+            foreach (var sample in replaySamples) Samples.Add(sample);
             SelectedSample = Samples.FirstOrDefault();
+            await InitializeRecipesAsync();
             await RefreshHistoryAsync();
             if (stopping) return;
             try
@@ -179,6 +184,7 @@ public sealed class StationViewModel : ObservableObject, IAsyncDisposable
         }
         OnPropertyChanged(nameof(CanEdit));
         RunCommand.NotifyCanExecuteChanged();
+        NotifyRecipeCommands();
     }
 
     private async Task RunAsync()
@@ -186,7 +192,7 @@ public sealed class StationViewModel : ObservableObject, IAsyncDisposable
         if (stopping || signingOut || sessionExpired || currentOperator is null || operatorClient is null) return;
         var sample = SelectedSample!;
         var product = ProductId.Trim();
-        var source = new ReplayImageSource(options.DataRoot, sample, ConstructedNormal);
+        var source = CreateReplaySource(sample, ConstructedNormal);
         SelectedHistory = null;
         ShowRecord(null);
         CurrentUser actor;
@@ -317,7 +323,9 @@ public sealed class StationViewModel : ObservableObject, IAsyncDisposable
         signingOut = true;
         NotifyAccessChanged();
         Notice = "正在换班，等待已接受的操作保存完成…";
-        await Task.WhenAll(RunCommand.ExecutionTask ?? Task.CompletedTask, ViewHistoryCommand.ExecutionTask ?? Task.CompletedTask);
+        await Task.WhenAll(RunCommand.ExecutionTask ?? Task.CompletedTask, ViewHistoryCommand.ExecutionTask ?? Task.CompletedTask,
+            RefreshRecipesCommand.ExecutionTask ?? Task.CompletedTask, DownloadRecipeCommand.ExecutionTask ?? Task.CompletedTask,
+            LoadCachedRecipeCommand.ExecutionTask ?? Task.CompletedTask);
         var actorName = currentOperator?.DisplayName;
         try
         {
@@ -357,6 +365,7 @@ public sealed class StationViewModel : ObservableObject, IAsyncDisposable
         RunCommand.NotifyCanExecuteChanged();
         ViewHistoryCommand.NotifyCanExecuteChanged();
         SignOutCommand.NotifyCanExecuteChanged();
+        NotifyRecipeCommands();
     }
 
     private async Task ShutdownAsync()
@@ -369,7 +378,8 @@ public sealed class StationViewModel : ObservableObject, IAsyncDisposable
             await uploadCancellation.CancelAsync();
             if (initializationTask != null) await initializationTask;
             await Task.WhenAll(RunCommand.ExecutionTask ?? Task.CompletedTask, ViewHistoryCommand.ExecutionTask ?? Task.CompletedTask,
-                SignOutCommand.ExecutionTask ?? Task.CompletedTask);
+                SignOutCommand.ExecutionTask ?? Task.CompletedTask, RefreshRecipesCommand.ExecutionTask ?? Task.CompletedTask,
+                DownloadRecipeCommand.ExecutionTask ?? Task.CompletedTask, LoadCachedRecipeCommand.ExecutionTask ?? Task.CompletedTask);
             if (uploadTask != null) await uploadTask;
         }
         finally

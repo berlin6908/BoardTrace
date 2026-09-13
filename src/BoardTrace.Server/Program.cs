@@ -55,6 +55,7 @@ app.UseAuthorization();
 app.MapAuth();
 app.MapInspections();
 app.MapRecipes();
+app.MapRecipePublications();
 app.MapMethods("/api/{**path}", ["GET", "POST", "PUT", "DELETE", "PATCH"], () => Results.NotFound());
 app.MapFallbackToFile("index.html");
 app.Run();

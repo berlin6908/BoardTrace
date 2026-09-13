@@ -12,6 +12,7 @@ export interface ClassicalSettings {
 }
 
 export interface RecipeTargets { minPrecision: number; minRecall: number; maxP95Ms: number }
+export interface ReleasePolicy { isFrozen: boolean; targets: RecipeTargets | null; reason: string | null }
 export interface SaveRecipeDraft { name: string; settings: ClassicalSettings; targets: RecipeTargets }
 export interface RecipeSnapshot extends SaveRecipeDraft { dataManifestSha256: string; snapshotHash: string }
 export interface RecipeDraft extends RecipeSnapshot { id: string; algorithm: 'Classical'; updatedAt: string }
@@ -58,6 +59,37 @@ export interface ValidationRun {
   completedAt: string | null
 }
 
+export interface PublishedRecipeSummary {
+  id: string
+  draftId: string
+  validationRunId: string
+  name: string
+  algorithm: 'Classical'
+  bundleHash: string
+  publishedById: string
+  publishedByName: string
+  publishedAt: string
+}
+export interface PublishedRecipeBundle {
+  versionId: string
+  draftId: string
+  validationRunId: string
+  name: string
+  algorithm: 'Classical'
+  settings: ClassicalSettings
+  targets: RecipeTargets
+  releaseTargets: RecipeTargets
+  input: { width: number; height: number; requiresReference: boolean }
+  algorithmAssemblySha256: string
+  inputManifestSha256: string
+  validationSnapshotHash: string
+  references: { sampleId: string; assetId: string; sha256: string; byteLength: number }[]
+  publishedById: string
+  publishedByName: string
+  publishedAt: string
+}
+export interface PublishedRecipeVersion { bundle: PublishedRecipeBundle; bundleHash: string }
+
 export const defaultClassicalSettings: ClassicalSettings = {
   binarizationThreshold: 127, edgeTolerance: 1, minimumArea: 8, closingSize: 3,
   boxPadding: 10, maximumTranslation: 12, minimumAlignmentResponse: 0.1,
@@ -90,4 +122,19 @@ export function startValidation(draftId: string, signal: AbortSignal): Promise<V
 }
 export function getValidation(id: string, signal: AbortSignal): Promise<ValidationRun> {
   return requestJson(`/api/recipes/validations/${encodeURIComponent(id)}`, { signal })
+}
+export function publishRecipe(draftId: string, validationRunId: string, signal: AbortSignal): Promise<PublishedRecipeVersion> {
+  return requestJson(`${draftUrl(draftId)}/publish`, {
+    method: 'POST', signal, headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ validationRunId }),
+  })
+}
+export function listPublishedRecipes(signal: AbortSignal): Promise<PublishedRecipeSummary[]> {
+  return requestJson('/api/recipes/versions', { signal })
+}
+export function getPublishedRecipe(id: string, signal: AbortSignal): Promise<PublishedRecipeVersion> {
+  return requestJson(`/api/recipes/versions/${encodeURIComponent(id)}`, { signal })
+}
+export function getReleasePolicy(signal: AbortSignal): Promise<ReleasePolicy> {
+  return requestJson('/api/recipes/release-policy', { signal })
 }

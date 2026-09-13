@@ -13,6 +13,8 @@ public sealed class BoardTraceDbContext(DbContextOptions<BoardTraceDbContext> op
     public DbSet<InspectionImage> Images => Set<InspectionImage>();
     public DbSet<RecipeDraft> RecipeDrafts => Set<RecipeDraft>();
     public DbSet<ValidationRun> ValidationRuns => Set<ValidationRun>();
+    public DbSet<RecipePublication> RecipeVersions => Set<RecipePublication>();
+    public DbSet<RecipeReferenceAsset> RecipeReferenceAssets => Set<RecipeReferenceAsset>();
 
     protected override void OnModelCreating(ModelBuilder model)
     {
@@ -46,5 +48,17 @@ public sealed class BoardTraceDbContext(DbContextOptions<BoardTraceDbContext> op
         model.Entity<ValidationRun>().Property(x => x.Status).HasMaxLength(24);
         model.Entity<ValidationRun>().Property(x => x.SnapshotHash).HasMaxLength(64).IsUnicode(false);
         model.Entity<ValidationRun>().HasIndex(x => new { x.Status, x.CreatedAt });
+        var version = model.Entity<RecipePublication>();
+        version.ToTable("RecipeVersions").HasKey(x => x.Id);
+        version.HasIndex(x => x.ValidationRunId).IsUnique();
+        version.Property(x => x.Name).HasMaxLength(200);
+        version.Property(x => x.BundleHash).HasMaxLength(64).IsUnicode(false);
+        version.Property(x => x.PublishedById).HasMaxLength(450);
+        version.Property(x => x.PublishedByName).HasMaxLength(128);
+        version.HasOne<RecipeDraft>().WithMany().HasForeignKey(x => x.DraftId).OnDelete(DeleteBehavior.Restrict);
+        version.HasOne<ValidationRun>().WithMany().HasForeignKey(x => x.ValidationRunId).OnDelete(DeleteBehavior.Restrict);
+        version.HasMany(x => x.Assets).WithOne().HasForeignKey(x => x.RecipeVersionId).OnDelete(DeleteBehavior.Cascade);
+        model.Entity<RecipeReferenceAsset>().ToTable("RecipeReferenceAssets").HasKey(x => x.Id);
+        model.Entity<RecipeReferenceAsset>().Property(x => x.Sha256).HasMaxLength(64).IsUnicode(false);
     }
 }

@@ -19,7 +19,7 @@ using Microsoft.Data.Sqlite;
 
 namespace BoardTrace.Station.Smoke;
 
-public static class Program
+public static partial class Program
 {
     private static readonly CurrentUser OfflineOperator = new("smoke-operator", "smoke-operator", "测试操作员", ["Operator"], null);
 
@@ -161,6 +161,7 @@ public static class Program
         await VerifyCloseWhileReadingAsync(output, options);
         await VerifyCloseDuringInitializationAsync(output, options);
         await VerifySessionAndShiftAsync(output, options);
+        await VerifyPublishedRecipeAsync(output, options);
         if (arguments.TryGetValue("--server", out var server))
         {
             var station = arguments.GetValueOrDefault("--station", "STATION-01");
@@ -199,6 +200,11 @@ public static class Program
         var window = new MainWindow { DataContext = model };
         window.Show();
         await model.InitializeAsync();
+        await model.RefreshRecipesCommand.ExecuteAsync(null);
+        var publications = await operatorClient.GetFromJsonAsync<PublishedRecipeSummary[]>("api/recipes/versions") ?? [];
+        Require(model.PublishedRecipes.Select(choice => choice.Summary.Id).Order().SequenceEqual(publications.Select(version => version.Id).Order())
+            && (publications.Length != 0 || model.RecipeNotice.Contains("中央尚无已发布方案")),
+            "The station's published version list differs from the real central service.");
         model.ProductId = "SIM-UPLOAD-DEFECT";
         await model.RunCommand.ExecuteAsync(null);
         var firstId = Guid.Parse(model.InspectionId);
