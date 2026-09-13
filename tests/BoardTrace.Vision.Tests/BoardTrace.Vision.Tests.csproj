@@ -19,5 +19,6 @@
 
   <ItemGroup>
     <ProjectReference Include="../../src/BoardTrace.Vision/BoardTrace.Vision.csproj" />
+    <None Update="Fixtures/pixel-detector.onnx" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>
