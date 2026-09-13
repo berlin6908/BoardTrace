@@ -2,6 +2,7 @@ using BoardTrace.Server.Inspections;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
 using BoardTrace.Server.Identity;
+using BoardTrace.Server.Recipes;
 
 namespace BoardTrace.Server.Storage;
 
@@ -10,6 +11,8 @@ public sealed class BoardTraceDbContext(DbContextOptions<BoardTraceDbContext> op
     public DbSet<InspectionAttempt> Inspections => Set<InspectionAttempt>();
     public DbSet<InspectionDefect> Defects => Set<InspectionDefect>();
     public DbSet<InspectionImage> Images => Set<InspectionImage>();
+    public DbSet<RecipeDraft> RecipeDrafts => Set<RecipeDraft>();
+    public DbSet<ValidationRun> ValidationRuns => Set<ValidationRun>();
 
     protected override void OnModelCreating(ModelBuilder model)
     {
@@ -36,5 +39,12 @@ public sealed class BoardTraceDbContext(DbContextOptions<BoardTraceDbContext> op
         model.Entity<InspectionDefect>().ToTable("Defects").HasKey(x => new { x.InspectionId, x.Ordinal });
         model.Entity<InspectionImage>().ToTable("InspectionImages").HasKey(x => new { x.InspectionId, x.Kind });
         model.Entity<InspectionImage>().Property(x => x.Kind).HasMaxLength(16);
+        model.Entity<RecipeDraft>().ToTable("RecipeDrafts").HasKey(x => x.Id);
+        model.Entity<RecipeDraft>().Property(x => x.Name).HasMaxLength(200);
+        model.Entity<RecipeDraft>().Property(x => x.SnapshotHash).HasMaxLength(64).IsUnicode(false);
+        model.Entity<ValidationRun>().ToTable("ValidationRuns").HasKey(x => x.Id);
+        model.Entity<ValidationRun>().Property(x => x.Status).HasMaxLength(24);
+        model.Entity<ValidationRun>().Property(x => x.SnapshotHash).HasMaxLength(64).IsUnicode(false);
+        model.Entity<ValidationRun>().HasIndex(x => new { x.Status, x.CreatedAt });
     }
 }

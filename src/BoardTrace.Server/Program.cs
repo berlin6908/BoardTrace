@@ -3,6 +3,7 @@ using BoardTrace.Server.Inspections;
 using Microsoft.EntityFrameworkCore;
 using BoardTrace.Server.Identity;
 using Microsoft.AspNetCore.Identity;
+using BoardTrace.Server.Recipes;
 
 var builder = WebApplication.CreateBuilder(new WebApplicationOptions
 {
@@ -30,6 +31,7 @@ builder.Services.ConfigureApplicationCookie(options =>
 builder.Services.AddAuthorizationBuilder()
     .AddPolicy("Human", policy => policy.RequireRole("Operator", "ProcessEngineer", "QualityEngineer"))
     .AddPolicy("Station", policy => policy.RequireRole("Station"));
+builder.Services.AddHostedService<RecipeValidationWorker>();
 var app = builder.Build();
 app.UseExceptionHandler();
 if (args.Contains("--initialize-development", StringComparer.Ordinal))
@@ -52,6 +54,7 @@ app.UseAuthentication();
 app.UseAuthorization();
 app.MapAuth();
 app.MapInspections();
+app.MapRecipes();
 app.MapMethods("/api/{**path}", ["GET", "POST", "PUT", "DELETE", "PATCH"], () => Results.NotFound());
 app.MapFallbackToFile("index.html");
 app.Run();

@@ -761,6 +761,7 @@
         "type": "Project",
         "dependencies": {
           "BoardTrace.Contracts": "[1.0.0, )",
+          "BoardTrace.Vision": "[1.0.0, )",
           "Microsoft.AspNetCore.Identity.EntityFrameworkCore": "[10.0.12, )",
           "Microsoft.EntityFrameworkCore.SqlServer": "[10.0.12, )"
         }
