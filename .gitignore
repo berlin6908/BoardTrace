@@ -22,6 +22,7 @@ TestResults/
 # Frontend
 **/node_modules/
 **/dist/
+/src/BoardTrace.Server/wwwroot/
 
 # Python
 .venv/

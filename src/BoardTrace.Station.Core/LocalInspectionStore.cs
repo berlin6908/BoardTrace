@@ -4,7 +4,7 @@ using Microsoft.Data.Sqlite;
 
 namespace BoardTrace.Station.Core;
 
-public sealed record StoredInspection(InspectionRecord Record, bool PendingUpload);
+public sealed record StoredInspection(InspectionRecord Record, bool PendingUpload, DateTimeOffset? AcknowledgedAt);
 
 public sealed class LocalInspectionStore(string databasePath)
 {
@@ -49,6 +49,12 @@ public sealed class LocalInspectionStore(string databasePath)
             CREATE INDEX IF NOT EXISTS IX_Inspections_StartedAt ON Inspections(StartedAt DESC);
             CREATE TABLE IF NOT EXISTS UploadState (
                 InspectionId TEXT PRIMARY KEY REFERENCES Inspections(Id)
+            );
+            CREATE TABLE IF NOT EXISTS UploadReceipts (
+                InspectionId TEXT PRIMARY KEY REFERENCES Inspections(Id),
+                ContentHash TEXT NOT NULL,
+                ReceivedAt INTEGER NOT NULL,
+                AcknowledgedAt INTEGER NOT NULL
             );
             """;
         command.ExecuteNonQuery();
@@ -102,6 +108,11 @@ public sealed class LocalInspectionStore(string databasePath)
         command.Parameters.AddWithValue("$id", id.ToString());
         using var reader = command.ExecuteReader();
         if (!reader.Read()) return null;
+        return ReadRecord(reader);
+    }
+
+    private static InspectionRecord ReadRecord(SqliteDataReader reader)
+    {
         var record = JsonSerializer.Deserialize<InspectionRecord>(reader.GetString(0), Json)!;
         return record with
         {
@@ -115,16 +126,70 @@ public sealed class LocalInspectionStore(string databasePath)
         using var connection = Open();
         using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT i.Document, u.InspectionId IS NOT NULL FROM Inspections i
+            SELECT i.Document, u.InspectionId IS NOT NULL, r.AcknowledgedAt FROM Inspections i
             LEFT JOIN UploadState u ON i.Id=u.InspectionId
+            LEFT JOIN UploadReceipts r ON i.Id=r.InspectionId
             ORDER BY i.StartedAt DESC, i.rowid DESC LIMIT $limit;
             """;
         command.Parameters.AddWithValue("$limit", limit);
         using var reader = command.ExecuteReader();
         var records = new List<StoredInspection>();
         while (reader.Read())
-            records.Add(new StoredInspection(JsonSerializer.Deserialize<InspectionRecord>(reader.GetString(0), Json)!, reader.GetBoolean(1)));
+            records.Add(new StoredInspection(JsonSerializer.Deserialize<InspectionRecord>(reader.GetString(0), Json)!,
+                reader.GetBoolean(1), reader.IsDBNull(2) ? null : DateTimeOffset.FromUnixTimeMilliseconds(reader.GetInt64(2))));
         return records;
+    }
+
+    public IReadOnlyList<InspectionRecord> ReadPending(int limit = 10)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(limit, 1);
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT i.Document, i.TestedImage, i.ReferenceImage FROM Inspections i
+            JOIN UploadState u ON i.Id=u.InspectionId
+            ORDER BY i.StartedAt, i.rowid LIMIT $limit;
+            """;
+        command.Parameters.AddWithValue("$limit", limit);
+        using var reader = command.ExecuteReader();
+        var records = new List<InspectionRecord>();
+        while (reader.Read()) records.Add(ReadRecord(reader));
+        return records;
+    }
+
+    public void ConfirmUploaded(InspectionReceipt receipt)
+    {
+        using var connection = Open();
+        using var transaction = connection.BeginTransaction();
+        using var read = connection.CreateCommand();
+        read.Transaction = transaction;
+        read.CommandText = """
+            SELECT i.Document, i.TestedImage, i.ReferenceImage FROM Inspections i
+            JOIN UploadState u ON i.Id=u.InspectionId WHERE i.Id=$id;
+            """;
+        read.Parameters.AddWithValue("$id", receipt.InspectionId.ToString());
+        InspectionRecord record;
+        using (var reader = read.ExecuteReader())
+        {
+            if (!reader.Read()) throw new InvalidOperationException("中央回执未对应待上传记录。");
+            record = ReadRecord(reader);
+        }
+        if (!string.Equals(receipt.ContentHash, InspectionTransfer.Hash(record), StringComparison.Ordinal))
+            throw new InvalidDataException("中央回执内容与本地档案不符，保留待上传记录。");
+
+        using var confirm = connection.CreateCommand();
+        confirm.Transaction = transaction;
+        confirm.CommandText = """
+            INSERT INTO UploadReceipts(InspectionId, ContentHash, ReceivedAt, AcknowledgedAt)
+            VALUES ($id, $hash, $received, $acknowledged);
+            DELETE FROM UploadState WHERE InspectionId=$id;
+            """;
+        confirm.Parameters.AddWithValue("$id", receipt.InspectionId.ToString());
+        confirm.Parameters.AddWithValue("$hash", receipt.ContentHash);
+        confirm.Parameters.AddWithValue("$received", receipt.ReceivedAt.ToUnixTimeMilliseconds());
+        confirm.Parameters.AddWithValue("$acknowledged", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        confirm.ExecuteNonQuery();
+        transaction.Commit();
     }
 
     public int PendingCount()

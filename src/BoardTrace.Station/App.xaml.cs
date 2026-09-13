@@ -27,21 +27,23 @@ public partial class App : Application
     }
 }
 
-public sealed record StationOptions(string StationId, string DataRoot, string ManifestPath, string DatabasePath)
+public sealed record StationOptions(string StationId, string DataRoot, string ManifestPath, string DatabasePath, Uri ServerUrl)
 {
     public static StationOptions Parse(string[] args)
     {
         var values = new Dictionary<string, string>();
         for (var index = 0; index < args.Length; index += 2)
         {
-            if (index + 1 >= args.Length || args[index] is not ("--station" or "--data-root" or "--manifest" or "--database"))
-                throw new ArgumentException("支持的参数：--station、--data-root、--manifest、--database，各需一个值。");
+            if (index + 1 >= args.Length || args[index] is not ("--station" or "--data-root" or "--manifest" or "--database" or "--server"))
+                throw new ArgumentException("支持的参数：--station、--data-root、--manifest、--database、--server，各需一个值。");
             values.Add(args[index], args[index + 1]);
         }
         var station = values.GetValueOrDefault("--station", "STATION-01");
+        var server = new Uri(values.GetValueOrDefault("--server", "http://127.0.0.1:5180").TrimEnd('/') + "/", UriKind.Absolute);
+        if (server.Scheme is not ("http" or "https")) throw new ArgumentException("中央服务地址必须为 HTTP 或 HTTPS 地址。");
         return new StationOptions(station,
             Path.GetFullPath(values.GetValueOrDefault("--data-root", "data")),
             Path.GetFullPath(values.GetValueOrDefault("--manifest", "training/manifests/inputs/validation.jsonl")),
-            Path.GetFullPath(values.GetValueOrDefault("--database", $"data/stations/{station}.db")));
+            Path.GetFullPath(values.GetValueOrDefault("--database", $"data/stations/{station}.db")), server);
     }
 }

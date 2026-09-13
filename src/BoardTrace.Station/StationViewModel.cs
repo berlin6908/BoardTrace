@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.IO;
+using System.Net.Http;
 using System.Text.Json;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
@@ -25,14 +26,22 @@ public sealed record InspectionRow(StoredInspection Stored)
     };
     public string Decision => StationViewModel.DecisionLabel(Stored.Record.Decision);
     public int Defects => Stored.Record.Defects.Count;
-    public string Upload => Stored.PendingUpload ? "待上传" : Stored.Record.ExecutionStatus == InspectionExecution.Started ? "未生成结果" : "已确认";
+    public string Upload => Stored.PendingUpload ? "待上传" : Stored.AcknowledgedAt is not null ? "已确认" : "未生成结果";
 }
 
-public sealed class StationViewModel : ObservableObject
+public sealed class StationViewModel : ObservableObject, IAsyncDisposable
 {
     private readonly StationOptions options;
     private readonly LocalInspectionStore store;
     private readonly InspectionCoordinator coordinator;
+    private readonly HttpClient uploadClient;
+    private readonly InspectionUploader uploader;
+    private readonly CancellationTokenSource uploadCancellation = new();
+    private readonly SemaphoreSlim historyRefresh = new(1, 1);
+    private Task? uploadTask;
+    private Task? initializationTask;
+    private Task? shutdownTask;
+    private bool stopping;
     private bool ready;
     private ReplaySample? selectedSample;
     private string productId = $"SIM-{DateTime.Now:yyyyMMdd-HHmmss}";
@@ -44,12 +53,16 @@ public sealed class StationViewModel : ObservableObject
     private BitmapSource? referenceImage;
     private int pendingCount;
     private InspectionRow? selectedHistory;
+    private string uploadStatus = "等待同步";
+    private string uploadNotice = "检测完成后自动上传。";
 
     public StationViewModel(StationOptions options)
     {
         this.options = options;
         store = new LocalInspectionStore(options.DatabasePath);
         coordinator = new InspectionCoordinator(store, new ClassicalSettings());
+        uploadClient = new HttpClient { BaseAddress = options.ServerUrl, Timeout = TimeSpan.FromSeconds(10) };
+        uploader = new InspectionUploader(store, uploadClient);
         RunCommand = new AsyncRelayCommand(RunAsync, () => CanEdit && !coordinator.IsFaulted && SelectedSample != null && !string.IsNullOrWhiteSpace(ProductId));
         ViewHistoryCommand = new AsyncRelayCommand(ViewHistoryAsync, () => SelectedHistory != null && CanEdit);
         RunCommand.PropertyChanged += (_, e) =>
@@ -68,7 +81,8 @@ public sealed class StationViewModel : ObservableObject
 
     public string StationId => options.StationId;
     public string DatabasePath => options.DatabasePath;
-    public bool CanEdit => ready && !RunCommand.IsRunning && !ViewHistoryCommand.IsRunning;
+    public string ServerAddress => options.ServerUrl.ToString();
+    public bool CanEdit => !stopping && ready && !RunCommand.IsRunning && !ViewHistoryCommand.IsRunning;
     public ObservableCollection<ReplaySample> Samples { get; } = [];
     public ObservableCollection<InspectionRow> History { get; } = [];
     public ObservableCollection<string> Events { get; } = [];
@@ -90,6 +104,8 @@ public sealed class StationViewModel : ObservableObject
     public string Status { get => status; private set => SetProperty(ref status, value); }
     public string Notice { get => notice; private set => SetProperty(ref notice, value); }
     public int PendingCount { get => pendingCount; private set => SetProperty(ref pendingCount, value); }
+    public string UploadStatus { get => uploadStatus; private set => SetProperty(ref uploadStatus, value); }
+    public string UploadNotice { get => uploadNotice; private set => SetProperty(ref uploadNotice, value); }
     public BitmapSource? TestedImage { get => testedImage; private set => SetProperty(ref testedImage, value); }
     public BitmapSource? ReferenceImage { get => referenceImage; private set => SetProperty(ref referenceImage, value); }
     public InspectionRow? SelectedHistory
@@ -112,7 +128,9 @@ public sealed class StationViewModel : ObservableObject
         QualityDecision.Pass => "合格", QualityDecision.Fail => "缺陷", _ => "未判定"
     };
 
-    public async Task InitializeAsync()
+    public Task InitializeAsync() => initializationTask ??= stopping ? Task.CompletedTask : InitializeCoreAsync();
+
+    private async Task InitializeCoreAsync()
     {
         try
         {
@@ -123,10 +141,12 @@ public sealed class StationViewModel : ObservableObject
                 Samples.Add(JsonSerializer.Deserialize<ReplaySample>(line, json) ?? throw new InvalidDataException("回放清单包含空记录。"));
             SelectedSample = Samples.FirstOrDefault();
             await RefreshHistoryAsync();
+            if (stopping) return;
             ready = true;
             Status = "准备就绪";
             Notice = "选择输入并开始检测。当前为工程回放，不计入生产批次。";
             AddEvent($"工位已启动，载入 {Samples.Count} 个回放输入。");
+            uploadTask = UploadLoopAsync(uploadCancellation.Token);
         }
         catch (Exception error)
         {
@@ -140,6 +160,7 @@ public sealed class StationViewModel : ObservableObject
 
     private async Task RunAsync()
     {
+        if (stopping) return;
         var sample = SelectedSample!;
         var product = ProductId.Trim();
         var source = new ReplayImageSource(options.DataRoot, sample, ConstructedNormal);
@@ -172,14 +193,93 @@ public sealed class StationViewModel : ObservableObject
 
     private async Task RefreshHistoryAsync()
     {
-        var rows = await Task.Run(() => store.ReadRecent());
-        PendingCount = await Task.Run(store.PendingCount);
-        History.Clear();
-        foreach (var row in rows) History.Add(new InspectionRow(row));
+        await historyRefresh.WaitAsync();
+        try
+        {
+            var rows = await Task.Run(() => store.ReadRecent());
+            PendingCount = await Task.Run(store.PendingCount);
+            var selectedId = SelectedHistory?.Id;
+            History.Clear();
+            foreach (var row in rows) History.Add(new InspectionRow(row));
+            SelectedHistory = History.FirstOrDefault(row => row.Id == selectedId);
+        }
+        finally { historyRefresh.Release(); }
+    }
+
+    private async Task UploadLoopAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                var delay = TimeSpan.FromSeconds(5);
+                try
+                {
+                    var result = await uploader.UploadPendingAsync(cancellationToken: cancellationToken);
+                    var previousNotice = UploadNotice;
+                    switch (result.Connection)
+                    {
+                        case UploadConnection.Connected:
+                            UploadStatus = "最近同步成功";
+                            UploadNotice = $"{DateTime.Now:HH:mm:ss} 中央已确认，本地原件继续保留。";
+                            if (result.Pending > 0) delay = TimeSpan.FromMilliseconds(200);
+                            break;
+                        case UploadConnection.Unavailable:
+                            UploadStatus = "中央暂不可达";
+                            UploadNotice = result.Error!;
+                            break;
+                        case UploadConnection.Rejected:
+                            UploadStatus = "同步需处理";
+                            UploadNotice = result.Error!;
+                            break;
+                    }
+                    if (result.Uploaded > 0)
+                    {
+                        AddEvent($"中央已确认 {result.Uploaded} 条检测记录，待上传 {result.Pending} 条。");
+                    }
+                    else if (result.Error != null && previousNotice != UploadNotice) AddEvent(UploadNotice);
+                    if (result.Uploaded > 0 || result.Pending != PendingCount) await RefreshHistoryAsync();
+                }
+                catch (Exception error) when (error is not OperationCanceledException)
+                {
+                    UploadStatus = "同步失败";
+                    var nextNotice = "本地上传状态未确认：" + error.Message;
+                    if (UploadNotice != nextNotice) AddEvent(nextNotice);
+                    UploadNotice = nextNotice;
+                }
+                await Task.Delay(delay, cancellationToken);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+    }
+
+    public ValueTask DisposeAsync() => new(shutdownTask ??= ShutdownAsync());
+
+    private async Task ShutdownAsync()
+    {
+        stopping = true;
+        OnPropertyChanged(nameof(CanEdit));
+        RunCommand.NotifyCanExecuteChanged();
+        ViewHistoryCommand.NotifyCanExecuteChanged();
+        Notice = "正在关闭，等待已接受的操作保存完成…";
+        try
+        {
+            await uploadCancellation.CancelAsync();
+            if (initializationTask != null) await initializationTask;
+            await Task.WhenAll(RunCommand.ExecutionTask ?? Task.CompletedTask, ViewHistoryCommand.ExecutionTask ?? Task.CompletedTask);
+            if (uploadTask != null) await uploadTask;
+        }
+        finally
+        {
+            uploadClient.Dispose();
+            uploadCancellation.Dispose();
+            historyRefresh.Dispose();
+        }
     }
 
     private async Task ViewHistoryAsync()
     {
+        if (stopping) return;
         var id = SelectedHistory!.Id;
         try
         {
