@@ -3,18 +3,26 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import onnx
 import onnxruntime as ort
 import torch
+from torchvision.ops import boxes as box_ops
 
 from dataset import DeepPcbDataset
-from detection_evaluation import CLASS_NAMES
+from detection_evaluation import CLASS_NAMES, evaluate_predictions
+from metrics import match
 from model import OnnxDetector, build_model
 from train import write_json
 
 
+# TorchVision 0.22.1 uses this branch for GPU detection and ONNX tracing, while
+# eager CPU switches large inputs to per-class NMS. Float32 offsets can change
+# suppression at an IoU boundary. Scope the same GPU branch to this command;
+# training and ordinary CPU inference keep their existing behavior.
+@patch.object(box_ops, "batched_nms", box_ops._batched_nms_coordinate_trick)
 def export(args):
     if args.samples < 1:
         raise ValueError("At least one validation comparison image is required")
@@ -44,24 +52,49 @@ def export(args):
     options = ort.SessionOptions()
     options.intra_op_num_threads = 4
     session = ort.InferenceSession(str(model_path), sess_options=options, providers=["CPUExecutionProvider"])
-    comparisons = []
+    comparisons, reference_predictions, onnx_predictions = [], [], []
+    protocol = state["identity"]["evaluationProtocol"]
     for index, sample in enumerate(dataset.rows):
         inputs = dataset.load_image(index).unsqueeze(0)
         with torch.inference_mode():
             expected = [value.numpy() for value in wrapper(inputs)]
         actual = session.run(None, {"images": inputs.numpy()})
-        np.testing.assert_array_equal(expected[1], actual[1])
-        np.testing.assert_allclose(expected[0], actual[0], atol=0.1, rtol=1e-4)
-        np.testing.assert_allclose(expected[2], actual[2], atol=1e-4, rtol=1e-3)
+        reference_row = prediction_row(sample["sampleId"], expected)
+        onnx_row = prediction_row(sample["sampleId"], actual)
+        try:
+            np.testing.assert_array_equal(expected[1], actual[1])
+            np.testing.assert_allclose(expected[0], actual[0], atol=0.1, rtol=1e-4)
+            np.testing.assert_allclose(expected[2], actual[2], atol=1e-4, rtol=1e-3)
+            np.testing.assert_array_equal(expected[2] >= protocol["confidenceThreshold"],
+                                          actual[2] >= protocol["confidenceThreshold"])
+            reference_matches = match(reference_row["defects"], dataset.truths[index]["defects"],
+                protocol["iouThreshold"], protocol["confidenceThreshold"])
+            actual_matches = match(onnx_row["defects"], dataset.truths[index]["defects"],
+                protocol["iouThreshold"], protocol["confidenceThreshold"])
+            assert reference_matches == actual_matches, "Deployment matching differs"
+        except AssertionError as error:
+            write_json(args.output / "comparison-failure.json", {"sampleId": sample["sampleId"],
+                "validationIndex": index, "error": str(error), "reference": reference_row, "onnx": onnx_row})
+            raise RuntimeError(f"ONNX comparison failed for validation sample {sample['sampleId']}") from error
+        reference_predictions.append(reference_row)
+        onnx_predictions.append(onnx_row)
         comparisons.append({"sampleId": sample["sampleId"], "image": sample["image"],
             "imageSha256": hashlib.sha256((args.data_root / sample["image"]).read_bytes()).hexdigest(),
             "detections": len(actual[1]), "maxBoxDelta": float(np.max(np.abs(expected[0] - actual[0]), initial=0)),
             "maxScoreDelta": float(np.max(np.abs(expected[2] - actual[2]), initial=0)),
             "boxes": actual[0].tolist(), "labels": actual[1].tolist(), "scores": actual[2].tolist()})
+        print(json.dumps({"comparisonSample": sample["sampleId"], "completed": index + 1,
+                          "detections": len(actual[1]), "deploymentMatching": "identical"}), flush=True)
+    reference_report = evaluate_predictions(dataset.truths, reference_predictions, protocol)
+    onnx_report = evaluate_predictions(dataset.truths, onnx_predictions, protocol)
+    write_json(args.output / "reference-validation.json", reference_report)
+    write_json(args.output / "onnx-validation.json", onnx_report)
     manifest = {"kind": state["identity"]["kind"], "model": "TorchVision FasterRCNN ResNet50 FPN",
         "checkpointEpoch": state["epoch"], "checkpointSha256": hashlib.sha256(args.checkpoint.read_bytes()).hexdigest(),
         "modelFile": model_path.name, "modelSha256": hashlib.sha256(model_path.read_bytes()).hexdigest(),
-        "modelSourceSha256": source_hash, "input": {"name": "images", "shape": [1, 3, 640, 640], "dtype": "float32",
+        "modelSourceSha256": source_hash, "exportSourceSha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "referenceNms": "TorchVision coordinate trick, matching GPU and ONNX tracing; export process only",
+        "input": {"name": "images", "shape": [1, 3, 640, 640], "dtype": "float32",
             "layout": "NCHW", "color": "RGB", "scale": "pixel / 255", "resize": "640x640 required",
             "normalization": "ImageNet mean/std inside model; do not apply it twice"},
         "outputs": {"boxes": "float32 Nx4 continuous xyxy pixels", "labels": "int64 N class IDs", "scores": "float32 N"},
@@ -76,6 +109,12 @@ def export(args):
     print(json.dumps({"modelSha256": manifest["modelSha256"], "verificationSamples": len(comparisons),
                       "maxBoxDelta": max(row["maxBoxDelta"] for row in comparisons),
                       "maxScoreDelta": max(row["maxScoreDelta"] for row in comparisons)}))
+
+
+def prediction_row(sample_id, outputs):
+    return {"sampleId": sample_id, "execution": "Completed", "defects": [
+        {"classId": int(label), "box": box.tolist(), "score": float(score)}
+        for box, label, score in zip(*outputs)]}
 
 
 if __name__ == "__main__":
