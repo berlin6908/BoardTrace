@@ -5,10 +5,12 @@ using System.Net.Http;
 using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Xml.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using System.Windows.Markup;
 using System.Windows.Threading;
 using BoardTrace.Contracts;
 using BoardTrace.Station;
@@ -36,10 +38,15 @@ public static class Program
         using var bindingLog = new TextWriterTraceListener(Path.Combine(output, "binding-errors.log"));
         PresentationTraceSources.DataBindingSource.Listeners.Add(bindingLog);
         PresentationTraceSources.DataBindingSource.Switch.Level = SourceLevels.Error;
-        var application = new App { ShutdownMode = ShutdownMode.OnExplicitShutdown };
-        application.InitializeComponent();
+        // A production App schedules its own OnStartup login as soon as the dispatcher runs.
+        // Use a plain Application while loading the same visual resources for screenshots.
+        var application = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+        var appMarkup = XDocument.Load(Path.GetFullPath("src/BoardTrace.Station/App.xaml"));
+        var resourceMarkup = appMarkup.Root!.Elements().Single(element => element.Name.LocalName == "Application.Resources");
+        var dictionaryMarkup = new XElement(XName.Get("ResourceDictionary", "http://schemas.microsoft.com/winfx/2006/xaml/presentation"), resourceMarkup.Elements());
+        application.Resources = (ResourceDictionary)XamlReader.Parse(dictionaryMarkup.ToString(SaveOptions.DisableFormatting));
         var exitCode = 1;
-        _ = Dispatcher.CurrentDispatcher.InvokeAsync(async () =>
+        _ = application.Dispatcher.InvokeAsync(async () =>
         {
             try
             {
@@ -58,10 +65,9 @@ public static class Program
             finally
             {
                 application.Shutdown();
-                Dispatcher.CurrentDispatcher.BeginInvokeShutdown(DispatcherPriority.Send);
             }
         });
-        Dispatcher.Run();
+        application.Run();
         return exitCode;
     }
 
