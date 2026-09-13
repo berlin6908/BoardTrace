@@ -7,4 +7,4 @@ if (-not (Test-Path 'data/DeepPCB/.git')) {
 }
 git -C data/DeepPCB checkout --detach $revision
 if ($LASTEXITCODE -ne 0) { throw 'DeepPCB revision checkout failed' }
-Write-Output "DeepPCB pinned at $revision. Research use only; see docs/data.md."
+Write-Output "DeepPCB pinned at $revision. Research use only; see https://github.com/tangsanli5201/DeepPCB#readme."
