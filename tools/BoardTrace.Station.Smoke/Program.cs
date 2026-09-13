@@ -162,6 +162,7 @@ public static partial class Program
         await VerifyCloseDuringInitializationAsync(output, options);
         await VerifySessionAndShiftAsync(output, options);
         await VerifyPublishedRecipeAsync(output, options);
+        await VerifyBatchUiAsync(output, options);
         if (arguments.TryGetValue("--server", out var server))
         {
             var station = arguments.GetValueOrDefault("--station", "STATION-01");

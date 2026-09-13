@@ -16,7 +16,7 @@ public sealed class LocalInspectionStoreTests
 
     private static InspectionRecord Started() => new()
     {
-        Id = Guid.NewGuid(), StationId = "TEST-01", ProductId = "SIM-1", SampleId = "sample-1",
+        Id = Guid.NewGuid(), StationId = "TEST-01", ProductId = "SIM-1", SampleId = "sample-1", Purpose = InspectionPurpose.EngineeringReplay,
         OperatorId = "operator-1", OperatorName = "Operator One",
             SourceKind = "Replay", RecipeId = "test-recipe", RecipeJson = "{}", StartedAt = DateTimeOffset.UtcNow
     };

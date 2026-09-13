@@ -110,6 +110,7 @@ public sealed class PublicationTests
             using (response) return (await response.Content.ReadFromJsonAsync<PublishedRecipeVersion>())!;
         }));
         var version = versions[0];
+        await server.AssignAsync(version.Bundle.VersionId);
         Assert.All(versions, other => Assert.Equal(version.BundleHash, other.BundleHash));
         Assert.Equal(version.BundleHash, PublishedRecipeTransfer.Hash(version.Bundle));
         Assert.Equal("publication-engineer", version.Bundle.PublishedByName);
@@ -222,6 +223,9 @@ public sealed class PublicationTests
         using var published = await server.Engineer.PostAsJsonAsync($"/api/recipes/drafts/{draft.Id}/publish", new PublishRecipeRequest(run.Id));
         published.EnsureSuccessStatusCode();
         var version = (await published.Content.ReadFromJsonAsync<PublishedRecipeVersion>())!;
+        Assert.Equal(HttpStatusCode.Forbidden, (await server.Station.GetAsync($"/api/recipes/versions/{version.Bundle.VersionId}/bundle")).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await server.Station.GetAsync($"/api/recipe-assets/{version.Bundle.References[0].AssetId}")).StatusCode);
+        await server.AssignAsync(version.Bundle.VersionId);
         foreach (var client in new[] { server.Engineer, server.Operator, server.Quality })
         {
             Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/recipes/versions")).StatusCode);
@@ -338,6 +342,12 @@ public sealed class PublicationTests
             using var response = await Engineer.PostAsJsonAsync("/api/recipes/drafts", input);
             response.EnsureSuccessStatusCode();
             return (await response.Content.ReadFromJsonAsync<RecipeDraftView>())!;
+        }
+
+        public async Task AssignAsync(Guid versionId)
+        {
+            using var response = await Engineer.PostAsJsonAsync("/api/batches", new CreateBatchRequest("ISOLATED-PUBLICATION-BATCH", "PCB", "TOP", 2, "PUBLICATION-STATION", versionId));
+            Assert.Equal(HttpStatusCode.Created, response.StatusCode);
         }
 
         public async Task<RecipeValidationView> ValidateAsync(Guid draftId)

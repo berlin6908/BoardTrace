@@ -7,6 +7,7 @@ import { ApiError, currentUser, login, logout, requestError, roleLabels } from '
 import type { CurrentUser } from './api'
 import TracePage from './TracePage.vue'
 import RecipesPage from './RecipesPage.vue'
+import BatchPage from './BatchPage.vue'
 
 const user = ref<CurrentUser | null>(null)
 const checkingSession = ref(true)
@@ -17,11 +18,11 @@ const password = ref('')
 const authError = ref('')
 const logoutError = ref('')
 const connectionFailed = ref(false)
-const activePage = ref<'trace' | 'recipes'>(window.location.hash === '#recipes' ? 'recipes' : 'trace')
+const activePage = ref<'trace' | 'recipes' | 'batches'>(window.location.hash === '#batches' ? 'batches' : window.location.hash === '#recipes' ? 'recipes' : 'trace')
 
-function navigate(page: 'trace' | 'recipes') {
+function navigate(page: 'trace' | 'recipes' | 'batches') {
   activePage.value = page
-  window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}${page === 'recipes' ? '#recipes' : ''}`)
+  window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}${page === 'trace' ? '' : `#${page}`}`)
 }
 
 async function acceptUser(value: CurrentUser) {
@@ -117,9 +118,11 @@ onMounted(checkSession)
         <nav class="workspace-nav" aria-label="工作区导航">
           <button type="button" :class="{ active: activePage === 'trace' }" :aria-current="activePage === 'trace' ? 'page' : undefined" @click="navigate('trace')">检测追溯</button>
           <button type="button" :class="{ active: activePage === 'recipes' }" :aria-current="activePage === 'recipes' ? 'page' : undefined" @click="navigate('recipes')">方案验证</button>
+          <button type="button" :class="{ active: activePage === 'batches' }" :aria-current="activePage === 'batches' ? 'page' : undefined" @click="navigate('batches')">批次与首件</button>
         </nav>
         <TracePage v-if="activePage === 'trace'" :key="user.id" @session-expired="sessionExpired" />
-        <RecipesPage v-else :key="user.id" :user="user" @session-expired="sessionExpired" />
+        <RecipesPage v-else-if="activePage === 'recipes'" :key="user.id" :user="user" @session-expired="sessionExpired" />
+        <BatchPage v-else :key="user.id" :user="user" @session-expired="sessionExpired" />
       </template>
     </div>
   </ElConfigProvider>

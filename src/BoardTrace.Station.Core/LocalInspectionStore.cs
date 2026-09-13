@@ -6,7 +6,7 @@ namespace BoardTrace.Station.Core;
 
 public sealed record StoredInspection(InspectionRecord Record, bool PendingUpload, DateTimeOffset? AcknowledgedAt);
 
-public sealed class LocalInspectionStore(string databasePath)
+public sealed partial class LocalInspectionStore(string databasePath)
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     public string DatabasePath { get; } = Path.GetFullPath(databasePath);
@@ -58,6 +58,7 @@ public sealed class LocalInspectionStore(string databasePath)
             );
             """;
         command.ExecuteNonQuery();
+        InitializeBatches(connection);
     }
 
     // Images live only in their BLOB columns, never duplicated as base64 in the document.

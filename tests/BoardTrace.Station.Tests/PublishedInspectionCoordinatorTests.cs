@@ -13,7 +13,7 @@ public sealed class PublishedInspectionCoordinatorTests
     private static readonly CurrentUser Operator = new("fixture-operator", "fixture", "Fixture Operator", ["Operator"], null);
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
-    private static Fixture Setup()
+    internal static Fixture Setup()
     {
         var folder = Path.Combine(Path.GetTempPath(), "boardtrace-tests", Guid.NewGuid().ToString());
         Directory.CreateDirectory(folder);
@@ -53,7 +53,7 @@ public sealed class PublishedInspectionCoordinatorTests
         exposedCopy[0] ^= 1;
         var coordinator = new InspectionCoordinator(f.Store, new ClassicalSettings());
         coordinator.UsePublishedRecipe(f.Loaded);
-        var record = await coordinator.InspectAsync("ST-1", "PUBLISHED-1", Operator, new PublishedReplayImageSource(f.Folder, Sample()));
+        var record = await coordinator.InspectAsync(InspectionPurpose.EngineeringReplay, "ST-1", "PUBLISHED-1", Operator, new PublishedReplayImageSource(f.Folder, Sample()));
         var archived = f.Store.Get(record.Id)!;
         Assert.Equal(InspectionExecution.Completed, archived.ExecutionStatus);
         Assert.Equal(QualityDecision.Fail, archived.Decision);
@@ -74,11 +74,11 @@ public sealed class PublishedInspectionCoordinatorTests
     {
         var f = Setup();
         var coordinator = new InspectionCoordinator(f.Store, new ClassicalSettings());
-        var engineering = await coordinator.InspectAsync("ST-1", "ENGINEERING", Operator, new ReplayImageSource(f.Folder, Sample()));
+        var engineering = await coordinator.InspectAsync(InspectionPurpose.EngineeringReplay, "ST-1", "ENGINEERING", Operator, new ReplayImageSource(f.Folder, Sample()));
         coordinator.UsePublishedRecipe(f.Loaded);
-        var published = await coordinator.InspectAsync("ST-1", "PUBLISHED", Operator, new PublishedReplayImageSource(f.Folder, Sample()));
+        var published = await coordinator.InspectAsync(InspectionPurpose.EngineeringReplay, "ST-1", "PUBLISHED", Operator, new PublishedReplayImageSource(f.Folder, Sample()));
         coordinator.UseDevelopmentRecipe(new ClassicalSettings(BoxPadding: 2));
-        var changed = await coordinator.InspectAsync("ST-1", "ENGINEERING-2", Operator, new ReplayImageSource(f.Folder, Sample()));
+        var changed = await coordinator.InspectAsync(InspectionPurpose.EngineeringReplay, "ST-1", "ENGINEERING-2", Operator, new ReplayImageSource(f.Folder, Sample()));
         Assert.StartsWith("classical-", engineering.RecipeId);
         Assert.Equal(new double[] { 460, 270, 495, 308 }, Assert.Single(engineering.Defects).Box);
         Assert.Equal(new double[] { 466, 276, 489, 302 }, Assert.Single(published.Defects).Box);
@@ -95,7 +95,7 @@ public sealed class PublishedInspectionCoordinatorTests
         var coordinator = new InspectionCoordinator(f.Store, new ClassicalSettings());
         coordinator.UsePublishedRecipe(f.Loaded);
         var paused = new PausedSource(new PublishedReplayImageSource(f.Folder, Sample()));
-        var inspection = coordinator.InspectAsync("ST-1", "BUSY", Operator, paused);
+        var inspection = coordinator.InspectAsync(InspectionPurpose.EngineeringReplay, "ST-1", "BUSY", Operator, paused);
         await paused.Entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
         try
         {
@@ -122,11 +122,11 @@ public sealed class PublishedInspectionCoordinatorTests
         }
         var coordinator = new InspectionCoordinator(f.Store, new ClassicalSettings());
         coordinator.UsePublishedRecipe(f.Loaded);
-        await Assert.ThrowsAsync<SqliteException>(() => coordinator.InspectAsync("ST-1", "FAULT", Operator, new PublishedReplayImageSource(f.Folder, Sample())));
+        await Assert.ThrowsAsync<SqliteException>(() => coordinator.InspectAsync(InspectionPurpose.EngineeringReplay, "ST-1", "FAULT", Operator, new PublishedReplayImageSource(f.Folder, Sample())));
         Assert.True(coordinator.IsFaulted);
         Assert.Throws<InvalidOperationException>(() => coordinator.UseDevelopmentRecipe(new ClassicalSettings()));
         Assert.Throws<InvalidOperationException>(() => coordinator.UsePublishedRecipe(f.Loaded));
-        await Assert.ThrowsAsync<InvalidOperationException>(() => coordinator.InspectAsync("ST-1", "AFTER-FAULT", Operator, new PublishedReplayImageSource(f.Folder, Sample())));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => coordinator.InspectAsync(InspectionPurpose.EngineeringReplay, "ST-1", "AFTER-FAULT", Operator, new PublishedReplayImageSource(f.Folder, Sample())));
         Assert.Single(f.Store.ReadRecent());
         Assert.Equal(0, f.Store.PendingCount());
     }
@@ -137,7 +137,7 @@ public sealed class PublishedInspectionCoordinatorTests
         var f = Setup();
         var coordinator = new InspectionCoordinator(f.Store, new ClassicalSettings());
         coordinator.UsePublishedRecipe(f.Loaded);
-        var record = await coordinator.InspectAsync("ST-1", "UNKNOWN", Operator, new PublishedReplayImageSource(f.Folder, Sample("unknown")));
+        var record = await coordinator.InspectAsync(InspectionPurpose.EngineeringReplay, "ST-1", "UNKNOWN", Operator, new PublishedReplayImageSource(f.Folder, Sample("unknown")));
         Assert.Equal(InspectionExecution.Failed, record.ExecutionStatus);
         Assert.Equal(QualityDecision.NotEvaluated, record.Decision);
         Assert.Equal(f.Loaded.VersionId.ToString("D"), record.RecipeId);
@@ -156,7 +156,7 @@ public sealed class PublishedInspectionCoordinatorTests
         var coordinator = new InspectionCoordinator(f.Store, new ClassicalSettings());
         coordinator.UsePublishedRecipe(f.Loaded);
         var source = new PublishedReplayImageSource(f.Folder, Sample(), f.Loaded.GetReferenceBytes("controlled-1"));
-        var record = await coordinator.InspectAsync("ST-1", "CONSTRUCTED", Operator, source);
+        var record = await coordinator.InspectAsync(InspectionPurpose.EngineeringReplay, "ST-1", "CONSTRUCTED", Operator, source);
         Assert.Equal("ConstructedNormal", record.SourceKind);
         Assert.Equal(QualityDecision.Pass, record.Decision);
         Assert.Equal(f.Reference, record.TestedImage);
@@ -168,7 +168,7 @@ public sealed class PublishedInspectionCoordinatorTests
     {
         var f = Setup();
         var coordinator = new InspectionCoordinator(f.Store, new ClassicalSettings());
-        var record = await coordinator.InspectAsync("ST-1", "WRONG-MODE", Operator, new PublishedReplayImageSource(f.Folder, Sample()));
+        var record = await coordinator.InspectAsync(InspectionPurpose.EngineeringReplay, "ST-1", "WRONG-MODE", Operator, new PublishedReplayImageSource(f.Folder, Sample()));
         Assert.Equal(InspectionExecution.Failed, record.ExecutionStatus);
         Assert.Equal(QualityDecision.NotEvaluated, record.Decision);
         Assert.NotNull(record.Error);
@@ -187,7 +187,7 @@ public sealed class PublishedInspectionCoordinatorTests
         Assert.Equal(new[] { "controlled-1" }, f.Loaded.SampleIds);
     }
 
-    private sealed record Fixture(string Folder, LocalInspectionStore Store, LocalRecipeStore Recipes,
+    internal sealed record Fixture(string Folder, LocalInspectionStore Store, LocalRecipeStore Recipes,
         LoadedClassicalRecipe Loaded, PublishedRecipeVersion Version, byte[] Reference, byte[] Tested);
 
     private sealed class PausedSource(IImageSource source) : IImageSource

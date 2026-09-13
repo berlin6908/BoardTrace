@@ -32,18 +32,49 @@ public sealed class InspectionCoordinator
         recipeId = "classical-" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(recipeJson)));
     }
 
-    public void UseDevelopmentRecipe(ClassicalSettings settings) => ChangeRecipe(() => SetDevelopmentRecipe(settings));
+    public void UseDevelopmentRecipe(ClassicalSettings settings) => ChangeRecipe(() =>
+    {
+        store.LeaveBatch();
+        SetDevelopmentRecipe(settings);
+    });
 
     public void UsePublishedRecipe(LoadedClassicalRecipe recipe)
     {
         ArgumentNullException.ThrowIfNull(recipe);
         ChangeRecipe(() =>
         {
-            publishedRecipe = recipe;
-            developmentDetector = null;
-            recipeId = recipe.VersionId.ToString("D");
-            recipeJson = recipe.RecipeJson;
+            store.LeaveBatch();
+            SetPublishedRecipe(recipe);
         });
+    }
+
+    private void SetPublishedRecipe(LoadedClassicalRecipe recipe)
+    {
+        publishedRecipe = recipe;
+        developmentDetector = null;
+        recipeId = recipe.VersionId.ToString("D");
+        recipeJson = recipe.RecipeJson;
+    }
+
+    public void UseBatch(BatchPackage package, LoadedClassicalRecipe recipe) => ChangeRecipe(() =>
+    {
+        store.SelectBatch(package, recipe);
+        SetPublishedRecipe(recipe);
+    });
+
+    public void StartBatch(BatchExecutionSession session) => ChangeRecipe(() => store.SaveExecutionSession(session));
+
+    public void EndOperatorSession()
+    {
+        if (Interlocked.CompareExchange(ref busy, 1, 0) != 0)
+            throw new InspectionRejectedException("请等待已接受检测完成后退出人员会话。");
+        try { store.ClearExecutionSession(); }
+        catch
+        {
+            faulted = true;
+            throw;
+        }
+        finally { Interlocked.Exchange(ref busy, 0); }
     }
 
     private void ChangeRecipe(Action change)
@@ -60,7 +91,7 @@ public sealed class InspectionCoordinator
 
     public bool IsFaulted => faulted;
 
-    public async Task<InspectionRecord> InspectAsync(string stationId, string productId, CurrentUser operatorUser, IImageSource source,
+    public async Task<InspectionRecord> InspectAsync(InspectionPurpose purpose, string stationId, string productId, CurrentUser operatorUser, IImageSource source,
         IProgress<string>? progress = null, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(stationId);
@@ -78,12 +109,12 @@ public sealed class InspectionCoordinator
             {
                 var record = new InspectionRecord
                 {
-                    Id = Guid.NewGuid(), StationId = stationId, ProductId = productId,
+                    Id = Guid.NewGuid(), StationId = stationId, ProductId = productId, Purpose = purpose,
                     OperatorId = operatorId, OperatorName = operatorName,
                     SampleId = source.SampleId, SourceKind = source.SourceKind,
                     RecipeId = recipeId, RecipeJson = recipeJson, StartedAt = DateTimeOffset.UtcNow
                 };
-                store.Begin(record);
+                record = store.BeginAccepted(record, publishedRecipe?.BundleHash);
                 try
                 {
                     progress?.Report("正在采集图像");
@@ -123,6 +154,7 @@ public sealed class InspectionCoordinator
                 return record;
             });
         }
+        catch (InspectionRejectedException) { throw; }
         catch
         {
             faulted = true;

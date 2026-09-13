@@ -10,7 +10,7 @@
                 <Button DockPanel.Dock="Right" Content="退出 / 换班" Command="{Binding SignOutCommand}" Margin="20,0,0,0" VerticalAlignment="Center" />
                 <StackPanel DockPanel.Dock="Right" VerticalAlignment="Center">
                     <TextBlock Text="{Binding StationId}" Foreground="White" FontSize="16" HorizontalAlignment="Right" />
-                    <TextBlock Text="工程回放 · 模拟输入" Foreground="#A5CBCB" FontSize="12" Margin="0,4,0,0" />
+                    <TextBlock Text="{Binding InspectionMode}" Foreground="#A5CBCB" FontSize="12" Margin="0,4,0,0" />
                 </StackPanel>
                 <TextBlock DockPanel.Dock="Right" Text="{Binding OperatorName}" Foreground="White" VerticalAlignment="Center" FontSize="14" Margin="0,0,24,0" />
                 <StackPanel>
@@ -26,7 +26,9 @@
                 <Border Style="{StaticResource Card}">
                     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                     <StackPanel>
-                        <TextBlock Text="回放检测" FontSize="18" FontWeight="SemiBold" Margin="0,0,0,20" />
+                        <TextBlock Text="{Binding ActiveBatchNumber}" FontSize="18" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,0,8" />
+                        <TextBlock Text="{Binding BatchStateText}" FontWeight="SemiBold" Foreground="#087F82" TextWrapping="Wrap" Margin="0,0,0,6" />
+                        <TextBlock Text="{Binding BatchProgress}" FontSize="11" Foreground="#687B86" TextWrapping="Wrap" Margin="0,0,0,16" />
                         <StackPanel IsEnabled="{Binding CanEdit}">
                             <TextBlock Text="输入样本" Margin="0,0,0,7" />
                             <ComboBox ItemsSource="{Binding Samples}" SelectedItem="{Binding SelectedSample}" DisplayMemberPath="SampleId"
@@ -36,12 +38,23 @@
                             <CheckBox IsChecked="{Binding ConstructedNormal}" Content="使用参考图构造正常输入" Margin="0,18,0,8" />
                             <TextBlock Text="构造输入只验证流程，不代表真实良品。" TextWrapping="Wrap" FontSize="11" Foreground="#687B86" />
                         </StackPanel>
-                        <Button Content="开始检测" Command="{Binding RunCommand}" Background="#087F82" Foreground="White" FontWeight="SemiBold" Margin="0,22,0,0" />
+                        <Button Content="{Binding RunButtonText}" Command="{Binding RunCommand}" Background="#087F82" Foreground="White" FontWeight="SemiBold" Margin="0,22,0,0" />
+                        <Expander x:Name="BatchExpander" Header="批次下载与启动" Margin="0,14,0,0">
+                            <StackPanel Margin="0,10,0,0">
+                                <Button Content="刷新本工位批次" Command="{Binding RefreshBatchesCommand}" />
+                                <ComboBox ItemsSource="{Binding AssignedBatches}" SelectedItem="{Binding SelectedBatch}" DisplayMemberPath="Label"
+                                          IsEnabled="{Binding CanEdit}" AutomationProperties.Name="本工位批次" Height="36" Margin="0,8,0,0" />
+                                <Button Content="下载并加载批次" Command="{Binding DownloadBatchCommand}" Margin="0,8,0,0" />
+                                <Button Content="刷新当前批次批准" Command="{Binding RefreshActiveBatchCommand}" Margin="0,8,0,0" />
+                                <Button Content="本班在线启动" Command="{Binding StartBatchCommand}" Margin="0,8,0,0" />
+                                <TextBlock Text="{Binding BatchNotice}" TextWrapping="Wrap" FontSize="11" Foreground="#687B86" Margin="0,8,0,0" />
+                            </StackPanel>
+                        </Expander>
                         <Separator Margin="0,20,0,14" Background="#DFE7EB" />
                         <TextBlock Text="当前方案" FontSize="11" Foreground="#687B86" />
                         <TextBlock Text="{Binding ActiveRecipeName}" TextWrapping="Wrap" Margin="0,6,0,0" />
                         <TextBlock Text="{Binding ActiveRecipeIdentity}" TextWrapping="Wrap" Margin="0,4,0,0" FontSize="11" Foreground="#687B86" />
-                        <Expander Header="工程方案选择" Margin="0,14,0,0">
+                        <Expander x:Name="RecipeExpander" Header="工程方案选择" Margin="0,14,0,0">
                             <StackPanel Margin="0,10,0,0">
                                 <Button Content="刷新已发布版本" Command="{Binding RefreshRecipesCommand}" />
                                 <ComboBox ItemsSource="{Binding PublishedRecipes}" SelectedItem="{Binding SelectedRecipe}" DisplayMemberPath="Label"
@@ -130,6 +143,7 @@
                             <DataGrid.Columns>
                                 <DataGridTextColumn Header="时间" Binding="{Binding Time}" Width="70" />
                                 <DataGridTextColumn Header="产品编号" Binding="{Binding Product}" Width="*" />
+                                <DataGridTextColumn Header="用途" Binding="{Binding Purpose}" Width="75" />
                                 <DataGridTextColumn Header="样本" Binding="{Binding Sample}" Width="80" />
                                 <DataGridTextColumn Header="执行" Binding="{Binding Execution}" Width="80" />
                                 <DataGridTextColumn Header="判定" Binding="{Binding Decision}" Width="65" />

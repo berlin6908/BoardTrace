@@ -1,5 +1,6 @@
 export type ExecutionStatus = 'Started' | 'Completed' | 'Failed' | 'Interrupted'
 export type Decision = 'NotEvaluated' | 'Pass' | 'Fail'
+export type InspectionPurpose = 'EngineeringReplay' | 'FirstArticle' | 'Production'
 
 export interface InspectionSummary {
   id: string
@@ -8,6 +9,9 @@ export interface InspectionSummary {
   sampleId: string
   sourceKind: string
   recipeId: string
+  purpose: InspectionPurpose
+  batchId: string | null
+  productionSequence: number | null
   startedAt: string
   completedAt: string | null
   executionStatus: ExecutionStatus
@@ -27,6 +31,7 @@ export interface DefectBox {
 export interface InspectionRecord extends Omit<InspectionSummary, 'defectCount' | 'receivedAt'> {
   operatorId: string
   operatorName: string
+  executionSessionId: string | null
   recipeJson: string
   width: number
   height: number
@@ -66,6 +71,10 @@ export const decisionLabels: Record<Decision, string> = {
 
 export const executionLabels: Record<ExecutionStatus, string> = {
   Started: '检测中', Completed: '已完成', Failed: '执行失败', Interrupted: '已中断',
+}
+
+export const purposeLabels: Record<InspectionPurpose, string> = {
+  EngineeringReplay: '工程回放', FirstArticle: '首件', Production: '生产',
 }
 
 export function sourceLabel(kind: string): string {

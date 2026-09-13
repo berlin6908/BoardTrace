@@ -48,7 +48,7 @@ public static partial class Program
         var window = new MainWindow { DataContext = model };
         window.Show();
         await model.InitializeAsync();
-        var expander = FindVisual<Expander>(window)!;
+        var expander = (Expander)window.FindName("RecipeExpander");
         expander.IsExpanded = true;
         Require(model.PublishedRecipes.Single().Cached && model.LoadCachedRecipeCommand.CanExecute(null),
             "The complete cached recipe was not offered after station initialization.");

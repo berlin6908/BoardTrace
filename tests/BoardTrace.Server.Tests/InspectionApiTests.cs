@@ -18,7 +18,7 @@ public sealed class InspectionApiTests
 {
     private static InspectionRecord Completed(Guid? id = null) => new()
     {
-        Id = id ?? Guid.NewGuid(), StationId = "STATION-A", ProductId = "SIM-100",
+        Id = id ?? Guid.NewGuid(), StationId = "STATION-A", ProductId = "SIM-100", Purpose = InspectionPurpose.EngineeringReplay,
         OperatorId = "operator-test", OperatorName = "Test Operator", SampleId = "sample-100",
         SourceKind = "Replay", RecipeId = "classical-test", RecipeJson = "{}",
         StartedAt = new DateTimeOffset(2026, 9, 13, 10, 0, 0, TimeSpan.Zero),

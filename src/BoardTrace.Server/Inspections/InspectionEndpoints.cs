@@ -5,10 +5,11 @@ using Microsoft.EntityFrameworkCore;
 using BoardTrace.Server.Identity;
 using Microsoft.AspNetCore.Identity;
 using System.Security.Claims;
+using BoardTrace.Server.Batches;
 
 namespace BoardTrace.Server.Inspections;
 
-public sealed record InspectionSummary(Guid Id, string StationId, string ProductId, string SampleId, string SourceKind,
+public sealed record InspectionSummary(Guid Id, string StationId, string ProductId, InspectionPurpose Purpose, Guid? BatchId, int? ProductionSequence, string SampleId, string SourceKind,
     string RecipeId, DateTimeOffset StartedAt, DateTimeOffset CompletedAt, InspectionExecution ExecutionStatus,
     QualityDecision Decision, int DefectCount, double? DetectionMs, DateTimeOffset ReceivedAt);
 
@@ -31,13 +32,15 @@ public static class InspectionEndpoints
     {
         var station = await users.GetUserAsync(principal);
         if (station?.StationId != record.StationId) return Results.Forbid();
+        var existing = await ReadReceiptAsync(db, id, cancellationToken);
+        if (existing != null) return RepeatResult(existing, InspectionTransfer.Hash(record));
         if (InspectionValidation.Validate(id, record) is string problem)
             return Results.Problem(statusCode: 400, title: "检测档案无效", detail: problem);
         if (await users.FindByIdAsync(record.OperatorId) is null)
             return Results.Problem(statusCode: 400, title: "操作员不存在");
+        if (await BatchInspectionGate.Check(record, db, cancellationToken) is string gate)
+            return Results.Problem(statusCode: 409, title: gate);
         var hash = InspectionTransfer.Hash(record);
-        var existing = await ReadReceiptAsync(db, id, cancellationToken);
-        if (existing != null) return RepeatResult(existing, hash);
 
         var inspection = InspectionAttempt.From(record, hash);
         db.Inspections.Add(inspection);
@@ -52,7 +55,12 @@ public static class InspectionEndpoints
             // A concurrent retry may commit after the initial lookup. The primary key is the final arbiter.
             db.ChangeTracker.Clear();
             existing = await ReadReceiptAsync(db, id, cancellationToken);
-            if (existing is null) throw;
+            if (existing is null)
+            {
+                if (record.Purpose == InspectionPurpose.Production && await db.Inspections.AnyAsync(row => row.BatchId == record.BatchId && row.ProductionSequence == record.ProductionSequence, cancellationToken))
+                    return Results.Problem(statusCode: 409, title: "该批次生产序号已被另一检测档案占用。");
+                throw;
+            }
             return RepeatResult(existing, hash);
         }
     }
@@ -79,7 +87,7 @@ public static class InspectionEndpoints
         var total = await query.CountAsync(cancellationToken);
         var items = await query.OrderByDescending(x => x.StartedAt).ThenBy(x => x.Id)
             .Skip((number - 1) * size).Take(size)
-            .Select(x => new InspectionSummary(x.Id, x.StationId, x.ProductId, x.SampleId, x.SourceKind, x.RecipeId,
+            .Select(x => new InspectionSummary(x.Id, x.StationId, x.ProductId, x.Purpose, x.BatchId, x.ProductionSequence, x.SampleId, x.SourceKind, x.RecipeId,
                 x.StartedAt, x.CompletedAt, x.ExecutionStatus, x.Decision, x.Defects.Count, x.DetectionMs, x.ReceivedAt))
             .ToArrayAsync(cancellationToken);
         return Results.Ok(new { items, total, page = number, pageSize = size });

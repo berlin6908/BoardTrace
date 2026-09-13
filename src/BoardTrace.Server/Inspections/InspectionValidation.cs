@@ -8,6 +8,7 @@ public static class InspectionValidation
     public static string? Validate(Guid id, InspectionRecord record)
     {
         if (id == Guid.Empty || record.Id != id) return "路径编号必须与检测档案编号一致。";
+        if (!Enum.IsDefined(record.Purpose)) return "检测用途无效。";
         foreach (var (value, limit, name) in new[]
         {
             (record.StationId, 128, "工位"), (record.ProductId, 128, "产品"),

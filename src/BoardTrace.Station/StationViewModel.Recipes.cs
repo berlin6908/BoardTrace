@@ -44,9 +44,9 @@ public sealed partial class StationViewModel
     {
         recipeStore = new LocalRecipeStore(options.DatabasePath);
         RefreshRecipesCommand = new AsyncRelayCommand(RefreshRecipesAsync, () => CanEdit);
-        DownloadRecipeCommand = new AsyncRelayCommand(DownloadRecipeAsync, () => CanEdit && SelectedRecipe != null && !coordinator.IsFaulted);
-        LoadCachedRecipeCommand = new AsyncRelayCommand(LoadCachedRecipeAsync, () => CanEdit && SelectedRecipe?.Cached == true && !coordinator.IsFaulted);
-        UseDevelopmentRecipeCommand = new RelayCommand(UseDevelopmentRecipe, () => CanEdit && loadedRecipe != null && !coordinator.IsFaulted);
+        DownloadRecipeCommand = new AsyncRelayCommand(DownloadRecipeAsync, () => CanChangeRecipe && SelectedRecipe != null && !coordinator.IsFaulted);
+        LoadCachedRecipeCommand = new AsyncRelayCommand(LoadCachedRecipeAsync, () => CanChangeRecipe && SelectedRecipe?.Cached == true && !coordinator.IsFaulted);
+        UseDevelopmentRecipeCommand = new RelayCommand(UseDevelopmentRecipe, () => CanChangeRecipe && loadedRecipe != null && !coordinator.IsFaulted);
         foreach (var command in new[] { RefreshRecipesCommand, DownloadRecipeCommand, LoadCachedRecipeCommand })
             command.PropertyChanged += (_, change) =>
             {
@@ -122,6 +122,9 @@ public sealed partial class StationViewModel
         var samples = replaySamples.Where(sample => allowedSamples.Contains(sample.SampleId)).ToArray();
         if (samples.Length == 0) throw new InvalidDataException("该版本与当前回放清单没有共同样本。");
         coordinator.UsePublishedRecipe(recipe);
+        activeBatch = null;
+        passedFirstArticle = null;
+        UpdateBatchDisplay();
         loadedRecipe = recipe;
         SelectRecipeSamples(samples);
         RecipeNotice = "完整版本已加载。工程回放使用缓存参考图，检测档案绑定此版本。";
@@ -130,11 +133,18 @@ public sealed partial class StationViewModel
 
     private void UseDevelopmentRecipe()
     {
-        coordinator.UseDevelopmentRecipe(new ClassicalSettings());
-        loadedRecipe = null;
-        SelectRecipeSamples(replaySamples);
-        RecipeNotice = "已明确切换至开发参数，工程回放不计入生产批次。";
-        AddEvent("已切换至经典开发参数。");
+        try
+        {
+            coordinator.UseDevelopmentRecipe(new ClassicalSettings());
+            activeBatch = null;
+            passedFirstArticle = null;
+            loadedRecipe = null;
+            UpdateBatchDisplay();
+            SelectRecipeSamples(replaySamples);
+            RecipeNotice = "已明确切换至开发参数，工程回放不计入生产批次。";
+            AddEvent("已切换至经典开发参数。");
+        }
+        catch (Exception error) { RecipeOperationFailed("切换工程回放失败", error); }
     }
 
     private void SelectRecipeSamples(IEnumerable<ReplaySample> samples)
@@ -158,6 +168,7 @@ public sealed partial class StationViewModel
         if (error is HttpRequestException { StatusCode: HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden })
         {
             sessionExpired = true;
+            ClearLocalOperatorSession();
             NotifyAccessChanged();
             RecipeNotice = "人员登录已失效，请退出 / 换班后重新登录。";
         }
