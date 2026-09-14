@@ -12,6 +12,8 @@ public sealed record CachedBatchState(BatchDefinition Batch, BatchStatus Status,
     public int AcceptedProductionCount => NextProductionSequence - 1;
 }
 
+public sealed record InspectionAcceptance(InspectionRecord Record, bool IsNew);
+
 public sealed partial class LocalInspectionStore
 {
     private static void InitializeBatches(SqliteConnection connection)
@@ -95,6 +97,7 @@ public sealed partial class LocalInspectionStore
             throw new InspectionRejectedException("首件批准不属于该批次。");
         using var connection = Open();
         using var transaction = connection.BeginTransaction();
+        RequireNoUnacknowledgedPlc(connection, transaction);
         var active = ReadActiveBatch(connection, transaction);
         if (active is not null && active.Batch.Id != batch.Id && active.Status != BatchStatus.Closed)
             throw new InspectionRejectedException("当前工位已有未关闭批次，不能切换。");
@@ -151,6 +154,7 @@ public sealed partial class LocalInspectionStore
     {
         using var connection = Open();
         using var transaction = connection.BeginTransaction();
+        RequireNoUnacknowledgedPlc(connection, transaction);
         var active = ReadActiveBatch(connection, transaction) ?? throw new InspectionRejectedException("尚未加载批次。");
         if (active.Batch.Id != session.BatchId || active.Batch.StationId != session.StationId ||
             active.Batch.RecipeBundleHash != session.RecipeBundleHash || active.Approval?.InspectionId != session.FirstArticleInspectionId ||
@@ -182,6 +186,7 @@ public sealed partial class LocalInspectionStore
     {
         using var connection = Open();
         using var transaction = connection.BeginTransaction();
+        RequireNoUnacknowledgedPlc(connection, transaction);
         var active = ReadActiveBatch(connection, transaction);
         if (active?.Status == BatchStatus.InProgress)
             throw new InspectionRejectedException("在制批次不能切换为工程回放，请先完成批次。");
@@ -192,10 +197,20 @@ public sealed partial class LocalInspectionStore
         transaction.Commit();
     }
 
-    public InspectionRecord BeginAccepted(InspectionRecord record, string? loadedBundleHash)
+    public InspectionAcceptance BeginAccepted(InspectionRecord record, string? loadedBundleHash)
     {
+        if (record.ExecutionStatus != InspectionExecution.Started)
+            throw new InspectionRejectedException("接件只能创建 Started 记录。");
+        var identity = ReadIdentity(record);
         using var connection = Open();
         using var transaction = connection.BeginTransaction();
+        if (identity is { } key && ReadPlcTrigger(connection, transaction, key) is { } previous)
+        {
+            if (previous.Record.StationId != record.StationId || previous.Record.ProductId != record.ProductId || previous.Record.SampleId != record.SampleId)
+                throw new InspectionRejectedException("同一 PLC 触发身份的工位、产品或样本已改变。");
+            return new InspectionAcceptance(previous.Record, false);
+        }
+        RequireNoUnacknowledgedPlc(connection, transaction);
         var active = ReadActiveBatch(connection, transaction);
         if (record.Purpose == InspectionPurpose.EngineeringReplay)
         {
@@ -251,7 +266,17 @@ public sealed partial class LocalInspectionStore
         insert.Parameters.AddWithValue("$started", record.StartedAt.ToUnixTimeMilliseconds());
         insert.Parameters.AddWithValue("$document", Document(record));
         insert.ExecuteNonQuery();
+        if (identity is { } trigger)
+        {
+            using var physical = connection.CreateCommand();
+            physical.Transaction = transaction;
+            physical.CommandText = "INSERT INTO PlcTriggers(ControllerSessionId,TriggerSequence,InspectionId) VALUES($controller,$sequence,$id);";
+            physical.Parameters.AddWithValue("$controller", trigger.ControllerSessionId.ToString());
+            physical.Parameters.AddWithValue("$sequence", (long)trigger.TriggerSequence);
+            physical.Parameters.AddWithValue("$id", record.Id.ToString());
+            physical.ExecuteNonQuery();
+        }
         transaction.Commit();
-        return record;
+        return new InspectionAcceptance(record, true);
     }
 }

@@ -88,6 +88,8 @@ onBeforeUnmount(() => detailRequest?.abort())
       <div v-if="record.batchId"><dt>批次 ID</dt><dd>{{ record.batchId }}</dd></div>
       <div v-if="record.productionSequence"><dt>生产序号</dt><dd>{{ record.productionSequence }}</dd></div>
       <div v-if="record.executionSessionId"><dt>执行会话 ID</dt><dd>{{ record.executionSessionId }}</dd></div>
+      <div v-if="record.controllerSessionId"><dt>PLC 会话 ID</dt><dd>{{ record.controllerSessionId }}</dd></div>
+      <div v-if="record.triggerSequence"><dt>PLC 触发序号</dt><dd>{{ record.triggerSequence }}</dd></div>
       <div><dt>操作员</dt><dd>{{ record.operatorName }}</dd></div>
       <div><dt>输入样本</dt><dd>{{ record.sampleId }}</dd></div>
       <div><dt>执行状态</dt><dd>{{ executionLabels[record.executionStatus] }}</dd></div>

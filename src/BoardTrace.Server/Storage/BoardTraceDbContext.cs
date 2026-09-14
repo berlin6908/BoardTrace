@@ -40,6 +40,8 @@ public sealed class BoardTraceDbContext(DbContextOptions<BoardTraceDbContext> op
         inspection.Property(x => x.Decision).HasConversion<string>().HasMaxLength(24);
         inspection.Property(x => x.Purpose).HasConversion<string>().HasMaxLength(24);
         inspection.HasIndex(x => new { x.BatchId, x.ProductionSequence }).IsUnique().HasFilter("[BatchId] IS NOT NULL AND [ProductionSequence] IS NOT NULL");
+        inspection.HasIndex(x => new { x.StationId, x.ControllerSessionId, x.TriggerSequence }).IsUnique()
+            .HasFilter("[ControllerSessionId] IS NOT NULL AND [TriggerSequence] IS NOT NULL");
         inspection.HasOne<BatchEntity>().WithMany().HasForeignKey(x => x.BatchId).OnDelete(DeleteBehavior.Restrict);
         inspection.HasOne<BatchExecutionSession>().WithMany().HasForeignKey(x => x.ExecutionSessionId).OnDelete(DeleteBehavior.Restrict);
         inspection.HasIndex(x => new { x.StationId, x.StartedAt });

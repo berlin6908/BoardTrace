@@ -32,7 +32,7 @@ public sealed class InspectionCoordinator
         recipeId = "classical-" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(recipeJson)));
     }
 
-    public void UseDevelopmentRecipe(ClassicalSettings settings) => ChangeRecipe(() =>
+    public void UseDevelopmentRecipe(ClassicalSettings settings) => ChangeWhileIdle(() =>
     {
         store.LeaveBatch();
         SetDevelopmentRecipe(settings);
@@ -41,7 +41,7 @@ public sealed class InspectionCoordinator
     public void UsePublishedRecipe(LoadedClassicalRecipe recipe)
     {
         ArgumentNullException.ThrowIfNull(recipe);
-        ChangeRecipe(() =>
+        ChangeWhileIdle(() =>
         {
             store.LeaveBatch();
             SetPublishedRecipe(recipe);
@@ -56,13 +56,23 @@ public sealed class InspectionCoordinator
         recipeJson = recipe.RecipeJson;
     }
 
-    public void UseBatch(BatchPackage package, LoadedClassicalRecipe recipe) => ChangeRecipe(() =>
+    public void UseBatch(BatchPackage package, LoadedClassicalRecipe recipe) => ChangeWhileIdle(() =>
     {
         store.SelectBatch(package, recipe);
         SetPublishedRecipe(recipe);
     });
 
-    public void StartBatch(BatchExecutionSession session) => ChangeRecipe(() => store.SaveExecutionSession(session));
+    // Startup reloads the already selected immutable recipe while retaining a PLC result.
+    // This does not select a batch or change its persisted session/approval/quantity.
+    public void RestoreCachedBatchRecipe(LoadedClassicalRecipe recipe) => ChangeWhileIdle(() =>
+    {
+        var active = store.ReadActiveBatch() ?? throw new InspectionRejectedException("本地尚未选择批次。");
+        if (active.Batch.RecipeVersionId != recipe.VersionId || active.Batch.RecipeBundleHash != recipe.BundleHash)
+            throw new InspectionRejectedException("恢复方案与当前缓存批次的固定版本不一致。");
+        SetPublishedRecipe(recipe);
+    });
+
+    public void StartBatch(BatchExecutionSession session) => ChangeWhileIdle(() => store.SaveExecutionSession(session));
 
     public void EndOperatorSession()
     {
@@ -77,22 +87,35 @@ public sealed class InspectionCoordinator
         finally { Interlocked.Exchange(ref busy, 0); }
     }
 
-    private void ChangeRecipe(Action change)
+    private void ChangeWhileIdle(Action change)
     {
         if (Interlocked.CompareExchange(ref busy, 1, 0) != 0)
-            throw new InvalidOperationException("工位忙，不能切换检测方案。");
+            throw new InvalidOperationException("工位忙，不能变更检测状态。");
         try
         {
             if (faulted) throw new InvalidOperationException("本地保存失败，工位已停止接件，不能通过切换方案恢复。");
             change();
         }
+        catch (InspectionRejectedException) { throw; }
+        catch { faulted = true; throw; }
         finally { Interlocked.Exchange(ref busy, 0); }
     }
 
     public bool IsFaulted => faulted;
+    public bool IsBusy => Volatile.Read(ref busy) != 0;
+
+    public void ConfirmPlcAck(Guid inspectionId) => ChangeWhileIdle(() => store.ConfirmPlcAck(inspectionId));
+
+    public int RecoverInterrupted()
+    {
+        var recovered = 0;
+        ChangeWhileIdle(() => recovered = store.RecoverInterrupted());
+        return recovered;
+    }
 
     public async Task<InspectionRecord> InspectAsync(InspectionPurpose purpose, string stationId, string productId, CurrentUser operatorUser, IImageSource source,
-        IProgress<string>? progress = null, CancellationToken cancellationToken = default)
+        IProgress<string>? progress = null, CancellationToken cancellationToken = default,
+        InspectionIdentity? identity = null, Action<InspectionRecord>? startedCommitted = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(stationId);
         ArgumentException.ThrowIfNullOrWhiteSpace(productId);
@@ -110,13 +133,17 @@ public sealed class InspectionCoordinator
                 var record = new InspectionRecord
                 {
                     Id = Guid.NewGuid(), StationId = stationId, ProductId = productId, Purpose = purpose,
+                    ControllerSessionId = identity?.ControllerSessionId, TriggerSequence = identity?.TriggerSequence,
                     OperatorId = operatorId, OperatorName = operatorName,
                     SampleId = source.SampleId, SourceKind = source.SourceKind,
                     RecipeId = recipeId, RecipeJson = recipeJson, StartedAt = DateTimeOffset.UtcNow
                 };
-                record = store.BeginAccepted(record, publishedRecipe?.BundleHash);
+                var accepted = store.BeginAccepted(record, publishedRecipe?.BundleHash);
+                record = accepted.Record;
+                if (!accepted.IsNew) return record;
                 try
                 {
+                    startedCommitted?.Invoke(record);
                     progress?.Report("正在采集图像");
                     var pair = await source.CaptureAsync(cancellationToken);
                     record = record with { TestedImage = pair.Tested };

@@ -1,12 +1,7 @@
 {
   "version": 1,
   "dependencies": {
-    "net10.0-windows7.0": {
-      "CommunityToolkit.Mvvm": {
-        "type": "Transitive",
-        "resolved": "8.4.2",
-        "contentHash": "WadCzGEc2U+3e20avRLng4qNtt4zoOGWrdUISqJWrHe3/FSnrYjuM5Sb4yQb09LhkBXrrI4Zt3dLKgRMbItsrg=="
-      },
+    "net10.0": {
       "FluentModbus": {
         "type": "Transitive",
         "resolved": "5.3.2",
@@ -138,13 +133,6 @@
       },
       "boardtrace.contracts": {
         "type": "Project"
-      },
-      "boardtrace.station": {
-        "type": "Project",
-        "dependencies": {
-          "BoardTrace.Station.Core": "[1.0.0, )",
-          "CommunityToolkit.Mvvm": "[8.4.2, )"
-        }
       },
       "boardtrace.station.core": {
         "type": "Project",

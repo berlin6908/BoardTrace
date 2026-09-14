@@ -11,6 +11,8 @@ public enum QualityDecision { NotEvaluated, Pass, Fail }
 [JsonConverter(typeof(JsonStringEnumConverter<InspectionPurpose>))]
 public enum InspectionPurpose { EngineeringReplay, FirstArticle, Production }
 
+public readonly record struct InspectionIdentity(Guid ControllerSessionId, uint TriggerSequence);
+
 public sealed record DefectBox(double[] Box, int? ClassId, double Score, int Area);
 
 public sealed record InspectionRecord
@@ -22,6 +24,8 @@ public sealed record InspectionRecord
     public Guid? BatchId { get; init; }
     public Guid? ExecutionSessionId { get; init; }
     public int? ProductionSequence { get; init; }
+    public Guid? ControllerSessionId { get; init; }
+    public uint? TriggerSequence { get; init; }
     public required string OperatorId { get; init; }
     public required string OperatorName { get; init; }
     public required string SampleId { get; init; }

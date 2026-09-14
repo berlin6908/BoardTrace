@@ -98,9 +98,12 @@ public sealed partial class StationViewModel
         // its own operator session; offline cold-start recovery belongs to the recovery flow.
         coordinator.EndOperatorSession();
         var recipe = await Task.Run(() => recipeStore.Load(cached.Batch.RecipeVersionId));
-        var version = JsonSerializer.Deserialize<PublishedRecipeVersion>(recipe.RecipeJson, new JsonSerializerOptions(JsonSerializerDefaults.Web))
-            ?? throw new InvalidDataException("本地批次缺少完整方案。");
-        await ApplyBatchAsync(new BatchPackage(cached.Batch, cached.Status, cached.Approval, version), recipe);
+        coordinator.RestoreCachedBatchRecipe(recipe);
+        loadedRecipe = recipe;
+        var allowed = recipe.SampleIds.ToHashSet(StringComparer.Ordinal);
+        SelectRecipeSamples(replaySamples.Where(sample => allowed.Contains(sample.SampleId)).ToArray());
+        await RefreshBatchStateAsync();
+        RecipeNotice = "已恢复当前批次固定缓存方案。";
     }
 
     private async Task RefreshBatchStateAsync()

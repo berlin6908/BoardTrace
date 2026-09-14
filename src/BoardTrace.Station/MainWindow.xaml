@@ -50,6 +50,17 @@
                                 <TextBlock Text="{Binding BatchNotice}" TextWrapping="Wrap" FontSize="11" Foreground="#687B86" Margin="0,8,0,0" />
                             </StackPanel>
                         </Expander>
+                        <Expander x:Name="PlcExpander" Header="PLC 设备通信" Margin="0,14,0,0">
+                            <StackPanel Margin="0,10,0,0">
+                                <TextBlock Text="模拟 PLC 地址" FontSize="11" />
+                                <TextBox Text="{Binding PlcHost, UpdateSourceTrigger=PropertyChanged}" IsEnabled="{Binding CanEditPlcEndpoint}" AutomationProperties.Name="PLC 地址" Margin="0,5,0,8" />
+                                <TextBlock Text="端口" FontSize="11" />
+                                <TextBox Text="{Binding PlcPort, UpdateSourceTrigger=PropertyChanged}" IsEnabled="{Binding CanEditPlcEndpoint}" AutomationProperties.Name="PLC 端口" Margin="0,5,0,8" />
+                                <Button Content="连接 PLC" Command="{Binding StartPlcCommand}" />
+                                <Button Content="停止 PLC 通信" Command="{Binding StopPlcCommand}" Margin="0,8,0,0" />
+                                <TextBlock Text="PLC 按当前已启动批次执行；未确认结果在重启后保留。" TextWrapping="Wrap" FontSize="11" Foreground="#687B86" Margin="0,8,0,0" />
+                            </StackPanel>
+                        </Expander>
                         <Separator Margin="0,20,0,14" Background="#DFE7EB" />
                         <TextBlock Text="当前方案" FontSize="11" Foreground="#687B86" />
                         <TextBlock Text="{Binding ActiveRecipeName}" TextWrapping="Wrap" Margin="0,6,0,0" />
@@ -90,6 +101,8 @@
                     </Grid>
                     <TextBlock Text="{Binding Status}" FontWeight="SemiBold" Margin="2,14,0,4" />
                     <TextBlock Text="{Binding Notice}" Foreground="#647B89" TextWrapping="Wrap" FontSize="12" Margin="2,0,0,0" />
+                    <TextBlock Text="{Binding PlcStatus}" FontWeight="SemiBold" Margin="2,8,0,0" />
+                    <TextBlock Text="{Binding PlcSignals}" Foreground="#647B89" TextWrapping="Wrap" FontSize="11" Margin="2,3,0,0" />
                     <TextBlock Foreground="#506775" FontSize="12" Margin="2,7,0,0" ToolTip="{Binding ServerAddress}">
                         <Run Text="中央同步 · " /><Run Text="{Binding UploadStatus, Mode=OneWay}" FontWeight="SemiBold" />
                     </TextBlock>

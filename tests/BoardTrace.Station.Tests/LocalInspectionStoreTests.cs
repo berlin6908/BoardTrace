@@ -26,7 +26,7 @@ public sealed class LocalInspectionStoreTests
     {
         var store = CreateStore();
         var started = Started();
-        store.Begin(started);
+        store.BeginAccepted(started, null);
         store.Complete(started with
         {
             ExecutionStatus = InspectionExecution.Completed, Decision = QualityDecision.Fail,
@@ -49,7 +49,7 @@ public sealed class LocalInspectionStoreTests
     {
         var store = CreateStore();
         var started = Started();
-        store.Begin(started);
+        store.BeginAccepted(started, null);
         using (var connection = new SqliteConnection($"Data Source={store.DatabasePath}"))
         {
             connection.Open();
@@ -77,7 +77,7 @@ public sealed class LocalInspectionStoreTests
     {
         var store = CreateStore();
         var started = Started();
-        store.Begin(started);
+        store.BeginAccepted(started, null);
         var completed = started with
         {
             ExecutionStatus = InspectionExecution.Completed, Decision = QualityDecision.Fail,

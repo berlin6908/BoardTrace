@@ -59,22 +59,12 @@ public sealed partial class LocalInspectionStore(string databasePath)
             """;
         command.ExecuteNonQuery();
         InitializeBatches(connection);
+        InitializePlc(connection);
     }
 
     // Images live only in their BLOB columns, never duplicated as base64 in the document.
     private static string Document(InspectionRecord record) =>
         JsonSerializer.Serialize(record with { TestedImage = null, ReferenceImage = null }, Json);
-
-    public void Begin(InspectionRecord record)
-    {
-        using var connection = Open();
-        using var command = connection.CreateCommand();
-        command.CommandText = "INSERT INTO Inspections(Id, StartedAt, Document) VALUES ($id, $started, $document);";
-        command.Parameters.AddWithValue("$id", record.Id.ToString());
-        command.Parameters.AddWithValue("$started", record.StartedAt.ToUnixTimeMilliseconds());
-        command.Parameters.AddWithValue("$document", Document(record));
-        command.ExecuteNonQuery();
-    }
 
     public void Complete(InspectionRecord record)
     {
@@ -84,10 +74,14 @@ public sealed partial class LocalInspectionStore(string databasePath)
         command.Transaction = transaction;
         command.CommandText = """
             UPDATE Inspections SET Document=$document, TestedImage=$tested, ReferenceImage=$reference
-            WHERE Id=$id AND json_extract(Document, '$.executionStatus')='Started';
+            WHERE Id=$id AND json_extract(Document, '$.executionStatus')='Started'
+                AND json_extract(Document, '$.controllerSessionId') IS $controller
+                AND json_extract(Document, '$.triggerSequence') IS $sequence;
             """;
         command.Parameters.AddWithValue("$id", record.Id.ToString());
         command.Parameters.AddWithValue("$document", Document(record));
+        command.Parameters.AddWithValue("$controller", record.ControllerSessionId is Guid controller ? controller.ToString() : DBNull.Value);
+        command.Parameters.AddWithValue("$sequence", record.TriggerSequence is uint sequence ? (long)sequence : DBNull.Value);
         command.Parameters.Add("$tested", SqliteType.Blob).Value = (object?)record.TestedImage ?? DBNull.Value;
         command.Parameters.Add("$reference", SqliteType.Blob).Value = (object?)record.ReferenceImage ?? DBNull.Value;
         if (command.ExecuteNonQuery() != 1)

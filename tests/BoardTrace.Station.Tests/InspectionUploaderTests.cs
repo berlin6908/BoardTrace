@@ -23,7 +23,7 @@ public sealed class InspectionUploaderTests
             OperatorId = "operator-1", OperatorName = "Operator One",
             SourceKind = "Replay", RecipeId = "test-recipe", RecipeJson = "{}", StartedAt = DateTimeOffset.UtcNow
         };
-        store.Begin(record);
+        store.BeginAccepted(record, null);
         record = record with
         {
             ExecutionStatus = InspectionExecution.Completed, Decision = QualityDecision.Fail,

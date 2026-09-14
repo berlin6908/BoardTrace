@@ -57,6 +57,10 @@ public static class InspectionEndpoints
             existing = await ReadReceiptAsync(db, id, cancellationToken);
             if (existing is null)
             {
+                if (record.ControllerSessionId is Guid session && record.TriggerSequence is uint sequence &&
+                    await db.Inspections.AnyAsync(row => row.StationId == record.StationId &&
+                        row.ControllerSessionId == session && row.TriggerSequence == sequence, cancellationToken))
+                    return Results.Problem(statusCode: 409, title: "PLC 物理触发身份已被另一检测档案占用。");
                 if (record.Purpose == InspectionPurpose.Production && await db.Inspections.AnyAsync(row => row.BatchId == record.BatchId && row.ProductionSequence == record.ProductionSequence, cancellationToken))
                     return Results.Problem(statusCode: 409, title: "该批次生产序号已被另一检测档案占用。");
                 throw;

@@ -73,11 +73,12 @@ public sealed partial class StationViewModel : ObservableObject, IAsyncDisposabl
         coordinator = new InspectionCoordinator(store, new ClassicalSettings());
         uploadClient = StationAuthentication.CreateClient(options.ServerUrl);
         batchDeviceClient = StationAuthentication.CreateClient(options.ServerUrl);
-        RunCommand = new AsyncRelayCommand(RunAsync, () => CanEdit && CanRunInspection && !coordinator.IsFaulted && SelectedSample != null && !string.IsNullOrWhiteSpace(ProductId));
+        RunCommand = new AsyncRelayCommand(RunAsync, () => CanEdit && !plcRunning && CanRunInspection && !coordinator.IsFaulted && SelectedSample != null && !string.IsNullOrWhiteSpace(ProductId));
         ViewHistoryCommand = new AsyncRelayCommand(ViewHistoryAsync, () => SelectedHistory != null && CanEdit);
         SignOutCommand = new AsyncRelayCommand(SignOutAsync, () => currentOperator != null && !stopping && !signingOut);
         InitializeRecipeCommands();
         InitializeBatchCommands();
+        InitializePlcCommands();
         RunCommand.PropertyChanged += (_, e) =>
         {
             if (e.PropertyName != nameof(RunCommand.IsRunning)) return;
@@ -100,7 +101,7 @@ public sealed partial class StationViewModel : ObservableObject, IAsyncDisposabl
     public string DatabasePath => options.DatabasePath;
     public string ServerAddress => options.ServerUrl.ToString();
     public string OperatorName => currentOperator?.DisplayName ?? "未登录";
-    public bool CanEdit => !stopping && !signingOut && !sessionExpired && currentOperator != null && ready && !RunCommand.IsRunning && !ViewHistoryCommand.IsRunning && !IsRecipeBusy && !IsBatchBusy;
+    public bool CanEdit => !stopping && !signingOut && !sessionExpired && currentOperator != null && ready && !plcInspecting && !plcWaitingAck && !RunCommand.IsRunning && !ViewHistoryCommand.IsRunning && !IsRecipeBusy && !IsBatchBusy;
     public ObservableCollection<ReplaySample> Samples { get; } = [];
     public ObservableCollection<InspectionRow> History { get; } = [];
     public ObservableCollection<string> Events { get; } = [];
@@ -155,6 +156,8 @@ public sealed partial class StationViewModel : ObservableObject, IAsyncDisposabl
         try
         {
             await Task.Run(store.Initialize);
+            var recovered = await Task.Run(coordinator.RecoverInterrupted);
+            if (recovered > 0) AddEvent($"已恢复 {recovered} 条中断档案，未重新采图。");
             var lines = await File.ReadAllLinesAsync(options.ManifestPath);
             var json = new JsonSerializerOptions(JsonSerializerDefaults.Web);
             foreach (var line in lines.Where(l => !string.IsNullOrWhiteSpace(l)))
@@ -163,6 +166,13 @@ public sealed partial class StationViewModel : ObservableObject, IAsyncDisposabl
             SelectedSample = Samples.FirstOrDefault();
             await InitializeRecipesAsync();
             await InitializeCachedBatchAsync();
+            var pendingPlc = await Task.Run(store.ReadUnacknowledgedPlc);
+            if (pendingPlc is not null)
+            {
+                plcWaitingAck = pendingPlc.Record.ExecutionStatus != InspectionExecution.Started;
+                ShowRecord(await Task.Run(() => store.Get(pendingPlc.Record.Id)));
+                PlcStatus = "已恢复未确认检测，请连接 PLC 完成原件握手";
+            }
             await RefreshHistoryAsync();
             if (stopping) return;
             try
@@ -196,6 +206,7 @@ public sealed partial class StationViewModel : ObservableObject, IAsyncDisposabl
         RunCommand.NotifyCanExecuteChanged();
         NotifyRecipeCommands();
         NotifyBatchCommands();
+        StartPlcCommand.NotifyCanExecuteChanged();
     }
 
     private async Task RunAsync()
@@ -325,6 +336,7 @@ public sealed partial class StationViewModel : ObservableObject, IAsyncDisposabl
         NotifyAccessChanged();
         Notice = "正在换班，等待已接受的操作保存完成…";
         if (initializationTask != null) await initializationTask;
+        await AwaitPlcInspectionAsync();
         await Task.WhenAll(RunCommand.ExecutionTask ?? Task.CompletedTask, ViewHistoryCommand.ExecutionTask ?? Task.CompletedTask,
             RefreshRecipesCommand.ExecutionTask ?? Task.CompletedTask, DownloadRecipeCommand.ExecutionTask ?? Task.CompletedTask,
             LoadCachedRecipeCommand.ExecutionTask ?? Task.CompletedTask, RefreshBatchesCommand.ExecutionTask ?? Task.CompletedTask,
@@ -389,6 +401,7 @@ public sealed partial class StationViewModel : ObservableObject, IAsyncDisposabl
         try
         {
             await uploadCancellation.CancelAsync();
+            await StopPlcAsync();
             if (initializationTask != null) await initializationTask;
             await Task.WhenAll(RunCommand.ExecutionTask ?? Task.CompletedTask, ViewHistoryCommand.ExecutionTask ?? Task.CompletedTask,
                 SignOutCommand.ExecutionTask ?? Task.CompletedTask, RefreshRecipesCommand.ExecutionTask ?? Task.CompletedTask,

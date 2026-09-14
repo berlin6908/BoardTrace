@@ -6,5 +6,6 @@
     <ProjectReference Include="../BoardTrace.Contracts/BoardTrace.Contracts.csproj" />
     <ProjectReference Include="../BoardTrace.Vision/BoardTrace.Vision.csproj" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.12" />
+    <PackageReference Include="FluentModbus" Version="5.3.2" />
   </ItemGroup>
 </Project>

@@ -12,6 +12,8 @@ public sealed class InspectionAttempt
     public Guid? BatchId { get; set; }
     public Guid? ExecutionSessionId { get; set; }
     public int? ProductionSequence { get; set; }
+    public Guid? ControllerSessionId { get; set; }
+    public long? TriggerSequence { get; set; }
     public string OperatorId { get; set; } = "";
     public string OperatorName { get; set; } = "";
     public string SampleId { get; set; } = "";
@@ -39,6 +41,7 @@ public sealed class InspectionAttempt
             Id = record.Id, StationId = record.StationId, ProductId = record.ProductId,
             Purpose = record.Purpose, BatchId = record.BatchId, ExecutionSessionId = record.ExecutionSessionId,
             ProductionSequence = record.ProductionSequence,
+            ControllerSessionId = record.ControllerSessionId, TriggerSequence = record.TriggerSequence,
             OperatorId = record.OperatorId, OperatorName = record.OperatorName,
             SampleId = record.SampleId, SourceKind = record.SourceKind, RecipeId = record.RecipeId,
             RecipeJson = record.RecipeJson, StartedAt = record.StartedAt, CompletedAt = record.CompletedAt!.Value,
@@ -60,6 +63,7 @@ public sealed class InspectionAttempt
     {
         Id = Id, StationId = StationId, ProductId = ProductId, OperatorId = OperatorId, OperatorName = OperatorName,
         Purpose = Purpose, BatchId = BatchId, ExecutionSessionId = ExecutionSessionId, ProductionSequence = ProductionSequence,
+        ControllerSessionId = ControllerSessionId, TriggerSequence = TriggerSequence is null ? null : checked((uint)TriggerSequence.Value),
         SampleId = SampleId, SourceKind = SourceKind,
         RecipeId = RecipeId, RecipeJson = RecipeJson, StartedAt = StartedAt, CompletedAt = CompletedAt,
         ExecutionStatus = ExecutionStatus, Decision = Decision, Width = Width, Height = Height,

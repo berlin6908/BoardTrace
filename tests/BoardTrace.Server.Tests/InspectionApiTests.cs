@@ -210,7 +210,7 @@ public sealed class InspectionApiTests
             CompletedAt = null, Defects = [], TestedImage = null, ReferenceImage = null
         };
         var record = Completed(started.Id);
-        store.Begin(started);
+        store.BeginAccepted(started, null);
         store.Complete(record);
 
         using var client = await server.CreateClientWithLostFirstResponseAsync();

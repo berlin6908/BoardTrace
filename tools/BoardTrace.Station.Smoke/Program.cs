@@ -29,8 +29,8 @@ public static partial class Program
         var arguments = new Dictionary<string, string>();
         for (var index = 0; index < args.Length; index += 2)
         {
-            if (index + 1 >= args.Length || args[index] is not ("--server" or "--station" or "--credentials" or "--development-accounts"))
-                throw new ArgumentException("Supported options: --server, --station, --credentials, --development-accounts.");
+            if (index + 1 >= args.Length || args[index] is not ("--server" or "--station" or "--credentials" or "--development-accounts" or "--scope"))
+                throw new ArgumentException("Supported options: --server, --station, --credentials, --development-accounts, --scope.");
             arguments.Add(args[index], args[index + 1]);
         }
         var output = Path.GetFullPath($"artifacts/station/{DateTime.UtcNow:yyyyMMdd-HHmmss}");
@@ -73,6 +73,12 @@ public static partial class Program
 
     private static async Task RunAsync(string output, Dictionary<string, string> arguments)
     {
+        if (arguments.GetValueOrDefault("--scope") == "plc")
+        {
+            await VerifyPlcUiAsync(output);
+            return;
+        }
+        if (arguments.ContainsKey("--scope")) throw new ArgumentException("--scope supports plc or omission for the full smoke flow.");
         using (var previewClient = StationAuthentication.CreateClient(new Uri("http://127.0.0.1:1/")))
         {
             var preview = new LoginWindow(previewClient, "STATION-01");

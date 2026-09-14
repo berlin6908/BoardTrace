@@ -32,6 +32,8 @@ export interface InspectionRecord extends Omit<InspectionSummary, 'defectCount' 
   operatorId: string
   operatorName: string
   executionSessionId: string | null
+  controllerSessionId: string | null
+  triggerSequence: number | null
   recipeJson: string
   width: number
   height: number
