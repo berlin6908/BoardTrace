@@ -19,11 +19,11 @@ public sealed class InspectionUploaderTests
     {
         var record = new InspectionRecord
         {
-            Id = Guid.NewGuid(), StationId = "TEST-UPLOAD", ProductId = "SIM-" + Guid.NewGuid(), SampleId = "sample-1",
+            Id = Guid.NewGuid(), StationId = "TEST-UPLOAD", ProductId = "SIM-" + Guid.NewGuid(), SampleId = "sample-1", Purpose = InspectionPurpose.EngineeringReplay,
             OperatorId = "operator-1", OperatorName = "Operator One",
             SourceKind = "Replay", RecipeId = "test-recipe", RecipeJson = "{}", StartedAt = DateTimeOffset.UtcNow
         };
-        store.Begin(record);
+        store.BeginAccepted(record, null);
         record = record with
         {
             ExecutionStatus = InspectionExecution.Completed, Decision = QualityDecision.Fail,

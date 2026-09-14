@@ -13,7 +13,7 @@ const props = defineProps<{
   showBoxes?: boolean
   selectedDefect?: number | null
 }>()
-const emit = defineEmits<{ select: [index: number]; failed: [] }>()
+const emit = defineEmits<{ select: [index: number]; failed: []; loaded: [] }>()
 const loaded = ref(false)
 const failed = ref(false)
 const attempt = ref(0)
@@ -31,7 +31,7 @@ function retry() {
   <div class="evidence-image" :style="{ aspectRatio }">
     <div v-if="!available" class="image-message">本次未保存{{ kind === 'tested' ? '待检' : '参考' }}图像</div>
     <template v-else>
-      <img v-show="loaded && !failed" :key="imageUrl" :src="imageUrl" :alt="kind === 'tested' ? '检测时保存的待检原图' : '检测时保存的参考原图'" @load="loaded = true" @error="failed = true; emit('failed')" />
+      <img v-show="loaded && !failed" :key="imageUrl" :src="imageUrl" :alt="kind === 'tested' ? '检测时保存的待检原图' : '检测时保存的参考原图'" @load="loaded = true; emit('loaded')" @error="failed = true; emit('failed')" />
       <div v-if="failed" class="image-message" role="alert"><span>图像读取失败</span><ElButton size="small" @click="retry">重试图像</ElButton></div>
       <div v-else-if="!loaded" class="image-message" role="status">正在读取原图…</div>
       <svg v-if="loaded && !failed && showBoxes && defects?.length" class="defect-overlay" :viewBox="`0 0 ${width} ${height}`" :aria-label="`${defects.length} 个算法检测区域`">

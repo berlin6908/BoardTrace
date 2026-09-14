@@ -4,7 +4,7 @@ import { ElAlert, ElButton, ElDrawer, ElEmpty, ElIcon, ElInput, ElOption, ElPagi
 import { ArrowRight, Refresh, Search } from '@element-plus/icons-vue'
 import InspectionDetail from './components/InspectionDetail.vue'
 import { ApiError, listInspections, requestError } from './api'
-import { decisionLabels, executionLabels, formatMs, formatTime, sourceLabel } from './inspections'
+import { decisionLabels, executionLabels, formatMs, formatTime, purposeLabels, sourceLabel } from './inspections'
 import type { Decision, InspectionPage } from './inspections'
 
 const emit = defineEmits<{ 'session-expired': [] }>()
@@ -114,6 +114,7 @@ onBeforeUnmount(() => listRequest?.abort())
             <ElTableColumn label="产品 / 样本" min-width="195"><template #default="{ row }"><button class="record-link" @click="openInspection(row.id)">{{ row.productId }}<ElIcon><ArrowRight /></ElIcon></button><span class="secondary-line">样本 {{ row.sampleId }}</span></template></ElTableColumn>
             <ElTableColumn label="开始时间" min-width="175"><template #default="{ row }"><span class="time-cell">{{ formatTime(row.startedAt) }}</span></template></ElTableColumn>
             <ElTableColumn prop="stationId" label="工位" min-width="115" />
+            <ElTableColumn label="用途 / 批次" min-width="155"><template #default="{ row }"><strong>{{ purposeLabels[row.purpose as keyof typeof purposeLabels] }}</strong><span v-if="row.batchId" class="secondary-line">批次 {{ row.batchId.slice(0, 8) }}<template v-if="row.productionSequence"> · #{{ row.productionSequence }}</template></span></template></ElTableColumn>
             <ElTableColumn label="质量判定" min-width="125"><template #default="{ row }"><ElTag :type="row.decision === 'Pass' ? 'success' : row.decision === 'Fail' ? 'danger' : 'info'" effect="light" round>{{ decisionLabels[row.decision as Decision] }}</ElTag><span v-if="row.executionStatus !== 'Completed'" class="secondary-line">{{ executionLabels[row.executionStatus as keyof typeof executionLabels] }}</span></template></ElTableColumn>
             <ElTableColumn prop="defectCount" label="缺陷区域" width="100" align="right" />
             <ElTableColumn label="检测耗时" width="115" align="right"><template #default="{ row }"><span class="numeric">{{ formatMs(row.detectionMs) }}</span></template></ElTableColumn>

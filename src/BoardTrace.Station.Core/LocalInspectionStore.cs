@@ -6,7 +6,7 @@ namespace BoardTrace.Station.Core;
 
 public sealed record StoredInspection(InspectionRecord Record, bool PendingUpload, DateTimeOffset? AcknowledgedAt);
 
-public sealed class LocalInspectionStore(string databasePath)
+public sealed partial class LocalInspectionStore(string databasePath)
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     public string DatabasePath { get; } = Path.GetFullPath(databasePath);
@@ -58,22 +58,14 @@ public sealed class LocalInspectionStore(string databasePath)
             );
             """;
         command.ExecuteNonQuery();
+        InitializeBatches(connection);
+        InitializePlc(connection);
+        InitializeImageRetention(connection);
     }
 
     // Images live only in their BLOB columns, never duplicated as base64 in the document.
     private static string Document(InspectionRecord record) =>
         JsonSerializer.Serialize(record with { TestedImage = null, ReferenceImage = null }, Json);
-
-    public void Begin(InspectionRecord record)
-    {
-        using var connection = Open();
-        using var command = connection.CreateCommand();
-        command.CommandText = "INSERT INTO Inspections(Id, StartedAt, Document) VALUES ($id, $started, $document);";
-        command.Parameters.AddWithValue("$id", record.Id.ToString());
-        command.Parameters.AddWithValue("$started", record.StartedAt.ToUnixTimeMilliseconds());
-        command.Parameters.AddWithValue("$document", Document(record));
-        command.ExecuteNonQuery();
-    }
 
     public void Complete(InspectionRecord record)
     {
@@ -83,10 +75,14 @@ public sealed class LocalInspectionStore(string databasePath)
         command.Transaction = transaction;
         command.CommandText = """
             UPDATE Inspections SET Document=$document, TestedImage=$tested, ReferenceImage=$reference
-            WHERE Id=$id AND json_extract(Document, '$.executionStatus')='Started';
+            WHERE Id=$id AND json_extract(Document, '$.executionStatus')='Started'
+                AND json_extract(Document, '$.controllerSessionId') IS $controller
+                AND json_extract(Document, '$.triggerSequence') IS $sequence;
             """;
         command.Parameters.AddWithValue("$id", record.Id.ToString());
         command.Parameters.AddWithValue("$document", Document(record));
+        command.Parameters.AddWithValue("$controller", record.ControllerSessionId is Guid controller ? controller.ToString() : DBNull.Value);
+        command.Parameters.AddWithValue("$sequence", record.TriggerSequence is uint sequence ? (long)sequence : DBNull.Value);
         command.Parameters.Add("$tested", SqliteType.Blob).Value = (object?)record.TestedImage ?? DBNull.Value;
         command.Parameters.Add("$reference", SqliteType.Blob).Value = (object?)record.ReferenceImage ?? DBNull.Value;
         if (command.ExecuteNonQuery() != 1)
@@ -104,7 +100,10 @@ public sealed class LocalInspectionStore(string databasePath)
     {
         using var connection = Open();
         using var command = connection.CreateCommand();
-        command.CommandText = "SELECT Document, TestedImage, ReferenceImage FROM Inspections WHERE Id=$id;";
+        command.CommandText = """
+            SELECT i.Document,i.TestedImage,i.ReferenceImage,p.PurgedAt FROM Inspections i
+            LEFT JOIN LocalImagePurges p ON p.InspectionId=i.Id WHERE i.Id=$id;
+            """;
         command.Parameters.AddWithValue("$id", id.ToString());
         using var reader = command.ExecuteReader();
         if (!reader.Read()) return null;
@@ -112,6 +111,13 @@ public sealed class LocalInspectionStore(string databasePath)
     }
 
     private static InspectionRecord ReadRecord(SqliteDataReader reader)
+    {
+        if (!reader.IsDBNull(3))
+            throw new InvalidOperationException("本地图像已按保留期清理，请通过中央追溯查看完整档案。");
+        return ReadImageRecord(reader);
+    }
+
+    private static InspectionRecord ReadImageRecord(SqliteDataReader reader)
     {
         var record = JsonSerializer.Deserialize<InspectionRecord>(reader.GetString(0), Json)!;
         return record with
@@ -146,8 +152,9 @@ public sealed class LocalInspectionStore(string databasePath)
         using var connection = Open();
         using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT i.Document, i.TestedImage, i.ReferenceImage FROM Inspections i
+            SELECT i.Document, i.TestedImage, i.ReferenceImage, p.PurgedAt FROM Inspections i
             JOIN UploadState u ON i.Id=u.InspectionId
+            LEFT JOIN LocalImagePurges p ON p.InspectionId=i.Id
             ORDER BY i.StartedAt, i.rowid LIMIT $limit;
             """;
         command.Parameters.AddWithValue("$limit", limit);
@@ -164,8 +171,9 @@ public sealed class LocalInspectionStore(string databasePath)
         using var read = connection.CreateCommand();
         read.Transaction = transaction;
         read.CommandText = """
-            SELECT i.Document, i.TestedImage, i.ReferenceImage FROM Inspections i
-            JOIN UploadState u ON i.Id=u.InspectionId WHERE i.Id=$id;
+            SELECT i.Document, i.TestedImage, i.ReferenceImage, p.PurgedAt FROM Inspections i
+            JOIN UploadState u ON i.Id=u.InspectionId
+            LEFT JOIN LocalImagePurges p ON p.InspectionId=i.Id WHERE i.Id=$id;
             """;
         read.Parameters.AddWithValue("$id", receipt.InspectionId.ToString());
         InspectionRecord record;

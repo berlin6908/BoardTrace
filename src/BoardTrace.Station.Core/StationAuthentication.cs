@@ -6,9 +6,17 @@ namespace BoardTrace.Station.Core;
 
 public static class StationAuthentication
 {
-    public static HttpClient CreateClient(Uri server) => new(new HttpClientHandler
+    public static HttpClient CreateClient(Uri server) => CreateClient(server, new CookieContainer());
+
+    public static StationPersonnelSession CreatePersonnelSession(Uri server)
     {
-        CookieContainer = new CookieContainer(), AllowAutoRedirect = false
+        var cookies = new CookieContainer();
+        return new StationPersonnelSession(CreateClient(server, cookies), cookies);
+    }
+
+    private static HttpClient CreateClient(Uri server, CookieContainer cookies) => new(new HttpClientHandler
+    {
+        CookieContainer = cookies, AllowAutoRedirect = false
     }) { BaseAddress = server, Timeout = TimeSpan.FromSeconds(10) };
 
     public static CurrentUser RequireOperator(CurrentUser? user)

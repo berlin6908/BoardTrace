@@ -160,21 +160,31 @@ public static class RecipePublicationEndpoints
             .Select(version => new PublishedRecipeSummary(version.Id, version.DraftId, version.ValidationRunId,
                 version.Name, "Classical", version.BundleHash, version.PublishedById, version.PublishedByName, version.PublishedAt)).ToArrayAsync(token));
 
-    private static async Task<IResult> Detail(Guid id, BoardTraceDbContext db, CancellationToken token)
+    private static async Task<IResult> Detail(Guid id, ClaimsPrincipal principal, UserManager<BoardTraceUser> users, BoardTraceDbContext db, CancellationToken token)
     {
         var version = await db.RecipeVersions.AsNoTracking().SingleOrDefaultAsync(version => version.Id == id, token);
-        return version is null ? Results.NotFound() : Results.Ok(version.View());
+        if (version is null) return Results.NotFound();
+        return await MayDownload(id, principal, users, db, token) ? Results.Ok(version.View()) : Results.Forbid();
     }
 
-    private static async Task<IResult> Reference(Guid id, BoardTraceDbContext db, HttpContext context, CancellationToken token)
+    private static async Task<IResult> Reference(Guid id, BoardTraceDbContext db, UserManager<BoardTraceUser> users, HttpContext context, CancellationToken token)
     {
         var asset = await db.RecipeReferenceAssets.AsNoTracking().SingleOrDefaultAsync(asset => asset.Id == id, token);
         if (asset is null) return Results.NotFound();
+        if (!await MayDownload(asset.RecipeVersionId, context.User, users, db, token)) return Results.Forbid();
         context.Response.Headers.CacheControl = "private,no-store";
         var bytes = asset.Content;
         var contentType = bytes.Length >= 8 && bytes[0] == 0x89 && bytes[1] == 0x50 ? "image/png"
             : bytes.Length >= 2 && bytes[0] == 0xff && bytes[1] == 0xd8 ? "image/jpeg" : "application/octet-stream";
         return Results.Bytes(bytes, contentType);
+    }
+
+    private static async Task<bool> MayDownload(Guid versionId, ClaimsPrincipal principal, UserManager<BoardTraceUser> users,
+        BoardTraceDbContext db, CancellationToken token)
+    {
+        if (principal.IsInRole("Operator") || principal.IsInRole("ProcessEngineer") || principal.IsInRole("QualityEngineer")) return true;
+        var station = await users.GetUserAsync(principal);
+        return station?.StationId is not null && await db.Batches.AnyAsync(batch => batch.StationId == station.StationId && batch.RecipeVersionId == versionId, token);
     }
 
     private static string Hash(byte[] bytes) => Convert.ToHexStringLower(SHA256.HashData(bytes));

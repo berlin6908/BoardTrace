@@ -13,6 +13,7 @@ public sealed class LoadedClassicalRecipe
     private readonly IReadOnlyDictionary<string, byte[]> references;
 
     public Guid VersionId { get; }
+    public string BundleHash { get; }
     public string Name { get; }
     public IReadOnlyList<string> SampleIds { get; }
     public string RecipeJson { get; }
@@ -40,6 +41,7 @@ public sealed class LoadedClassicalRecipe
         detector = new ClassicalDetector(new ClassicalSettings(settings.BinarizationThreshold, settings.EdgeTolerance,
             settings.MinimumArea, settings.ClosingSize, settings.BoxPadding, settings.MaximumTranslation, settings.MinimumAlignmentResponse));
         VersionId = bundle.VersionId;
+        BundleHash = version.BundleHash;
         Name = bundle.Name;
         SampleIds = Array.AsReadOnly(references.Keys.Order(StringComparer.Ordinal).ToArray());
         RecipeJson = recipeJson;

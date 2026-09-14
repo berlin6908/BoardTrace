@@ -3,6 +3,8 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
 using BoardTrace.Server.Identity;
 using BoardTrace.Server.Recipes;
+using BoardTrace.Server.Batches;
+using BoardTrace.Contracts;
 
 namespace BoardTrace.Server.Storage;
 
@@ -15,6 +17,9 @@ public sealed class BoardTraceDbContext(DbContextOptions<BoardTraceDbContext> op
     public DbSet<ValidationRun> ValidationRuns => Set<ValidationRun>();
     public DbSet<RecipePublication> RecipeVersions => Set<RecipePublication>();
     public DbSet<RecipeReferenceAsset> RecipeReferenceAssets => Set<RecipeReferenceAsset>();
+    public DbSet<BatchEntity> Batches => Set<BatchEntity>();
+    public DbSet<FirstArticleApproval> FirstArticleApprovals => Set<FirstArticleApproval>();
+    public DbSet<BatchExecutionSession> BatchExecutionSessions => Set<BatchExecutionSession>();
 
     protected override void OnModelCreating(ModelBuilder model)
     {
@@ -33,6 +38,12 @@ public sealed class BoardTraceDbContext(DbContextOptions<BoardTraceDbContext> op
         inspection.Property(x => x.ContentHash).HasMaxLength(64).IsUnicode(false);
         inspection.Property(x => x.ExecutionStatus).HasConversion<string>().HasMaxLength(24);
         inspection.Property(x => x.Decision).HasConversion<string>().HasMaxLength(24);
+        inspection.Property(x => x.Purpose).HasConversion<string>().HasMaxLength(24);
+        inspection.HasIndex(x => new { x.BatchId, x.ProductionSequence }).IsUnique().HasFilter("[BatchId] IS NOT NULL AND [ProductionSequence] IS NOT NULL");
+        inspection.HasIndex(x => new { x.StationId, x.ControllerSessionId, x.TriggerSequence }).IsUnique()
+            .HasFilter("[ControllerSessionId] IS NOT NULL AND [TriggerSequence] IS NOT NULL");
+        inspection.HasOne<BatchEntity>().WithMany().HasForeignKey(x => x.BatchId).OnDelete(DeleteBehavior.Restrict);
+        inspection.HasOne<BatchExecutionSession>().WithMany().HasForeignKey(x => x.ExecutionSessionId).OnDelete(DeleteBehavior.Restrict);
         inspection.HasIndex(x => new { x.StationId, x.StartedAt });
         inspection.HasIndex(x => new { x.ProductId, x.StartedAt });
         inspection.HasIndex(x => x.StartedAt);
@@ -60,5 +71,28 @@ public sealed class BoardTraceDbContext(DbContextOptions<BoardTraceDbContext> op
         version.HasMany(x => x.Assets).WithOne().HasForeignKey(x => x.RecipeVersionId).OnDelete(DeleteBehavior.Cascade);
         model.Entity<RecipeReferenceAsset>().ToTable("RecipeReferenceAssets").HasKey(x => x.Id);
         model.Entity<RecipeReferenceAsset>().Property(x => x.Sha256).HasMaxLength(64).IsUnicode(false);
+        var batch = model.Entity<BatchEntity>();
+        batch.ToTable("Batches").HasKey(x => x.Id);
+        batch.Property(x => x.BatchNumber).HasMaxLength(128);
+        batch.Property(x => x.StationId).HasMaxLength(128);
+        batch.Property(x => x.ProductType).HasMaxLength(128);
+        batch.Property(x => x.FieldOfView).HasMaxLength(128);
+        batch.Property(x => x.RecipeBundleHash).HasMaxLength(64).IsUnicode(false);
+        batch.Property(x => x.Status).HasConversion<string>().HasMaxLength(24);
+        batch.HasIndex(x => x.BatchNumber).IsUnique();
+        batch.HasIndex(x => x.StationId).IsUnique().HasFilter("[Status] <> 'Closed'");
+        batch.HasOne<RecipePublication>().WithMany().HasForeignKey(x => x.RecipeVersionId).OnDelete(DeleteBehavior.Restrict);
+        var approval = model.Entity<FirstArticleApproval>();
+        approval.ToTable("FirstArticleApprovals").HasKey(x => x.BatchId);
+        approval.HasOne<BatchEntity>().WithOne().HasForeignKey<FirstArticleApproval>(x => x.BatchId).OnDelete(DeleteBehavior.Restrict);
+        approval.HasOne<InspectionAttempt>().WithMany().HasForeignKey(x => x.InspectionId).OnDelete(DeleteBehavior.Restrict);
+        var session = model.Entity<BatchExecutionSession>();
+        session.ToTable("BatchExecutionSessions").HasKey(x => x.Id);
+        session.Property(x => x.StationId).HasMaxLength(128);
+        session.Property(x => x.OperatorId).HasMaxLength(450);
+        session.Property(x => x.RecipeBundleHash).HasMaxLength(64).IsUnicode(false);
+        session.HasIndex(x => new { x.BatchId, x.OperatorId });
+        session.HasOne<BatchEntity>().WithMany().HasForeignKey(x => x.BatchId).OnDelete(DeleteBehavior.Restrict);
+        session.HasOne<InspectionAttempt>().WithMany().HasForeignKey(x => x.FirstArticleInspectionId).OnDelete(DeleteBehavior.Restrict);
     }
 }
