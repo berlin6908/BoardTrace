@@ -25,6 +25,11 @@ if ($contexts[0].Options.StationId -eq $contexts[1].Options.StationId -or
     ($contexts[0].ProductionCount + $contexts[1].ProductionCount) -lt $MinimumTriggers) {
     throw '两工位须有不同身份、批次、端口、SQLite，计划数量须满足总触发数。'
 }
+foreach ($context in $contexts) {
+    if ($context.Scenario -notin @('normal','duplicate-trigger','busy','lost-ack')) {
+        throw "工位 $($context.Options.StationId) 缺少明确的模拟器场景。"
+    }
+}
 if (Test-Path -LiteralPath $output) { throw "证据目录已存在：$output" }
 New-Item -ItemType Directory -Path $output | Out-Null
 $runtime = @()
@@ -96,7 +101,7 @@ try {
         $c = $item.Context
         $state = Join-Path $item.Folder 'simulator.db'
         $events = Join-Path $item.Folder 'plc-events.jsonl'
-        $arguments = @('-m','tools.simulator','--scenario','normal','--host','127.0.0.1',
+        $arguments = @('-m','tools.simulator','--scenario',"$($c.Scenario)",'--host','127.0.0.1',
             '--port',"$($c.PlcPort)",'--count',"$($c.ProductionCount)",'--product-prefix',"$($c.ProductPrefix)",
             '--samples',"$($c.SamplesPath)",'--state',$state,'--output',$events,'--timeout','60')
         $owned += Start-Owned $python $arguments $item.Folder 'simulator'
