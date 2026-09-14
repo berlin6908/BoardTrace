@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using BoardTrace.Contracts;
 using BoardTrace.Server.Storage;
 using Microsoft.AspNetCore.Identity;
@@ -25,8 +26,8 @@ public static class DevelopmentInitializer
     {
         var target = new SqlConnectionStringBuilder(connectionString);
         if (!string.Equals(target.DataSource, @"(localdb)\BoardTrace", StringComparison.OrdinalIgnoreCase) ||
-            !string.Equals(target.InitialCatalog, "BoardTrace", StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException("开发初始化只允许本地 BoardTrace 数据库。");
+            !Regex.IsMatch(target.InitialCatalog, @"\ABoardTrace(?:_[A-Za-z0-9_]+)?\z", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+            throw new InvalidOperationException("初始化只允许 (localdb)\\BoardTrace 实例中的 BoardTrace 或 BoardTrace_<字母、数字、下划线> 数据库。");
         await using var scope = services.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<BoardTraceDbContext>();
         if (reset) await db.Database.EnsureDeletedAsync();
