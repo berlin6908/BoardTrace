@@ -1,4 +1,4 @@
-"""Account for every ground-truth sample including missing/failed execution."""
+"""Score detector-emitted deployment results without applying another score filter."""
 import argparse
 import json
 from pathlib import Path
@@ -28,12 +28,13 @@ def score(truth_path, predictions_path, output_path, class_aware):
         else:
             defects = prediction["defects"]
             elapsed.append(prediction["elapsedMs"])
-        matched = match(defects, row["defects"], class_aware=class_aware)
+        # The detector already applied its configured per-class operating thresholds.
+        matched = match(defects, row["defects"], confidence=0, class_aware=class_aware)
         tp += len(matched["matches"])
         fp += len(matched["falsePositives"])
         fn += len(matched["falseNegatives"])
     report = {"images": len(truths), "executionFailures": failures, "failedSamples": failed_samples,
-        "groundTruthDefects": tp + fn, "classAware": class_aware, "iou": 0.5, "confidence": 0.5,
+        "groundTruthDefects": tp + fn, "classAware": class_aware, "iou": 0.5, "additionalScoreFiltering": False,
         **operating_point(tp, fp, fn), "latencyIncludesColdStart": True,
         "latencySamples": len(elapsed), "detectionP50Ms": float(np.percentile(elapsed, 50)) if elapsed else None,
         "detectionP95Ms": float(np.percentile(elapsed, 95)) if elapsed else None}
