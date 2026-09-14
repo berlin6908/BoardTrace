@@ -129,6 +129,8 @@ public sealed partial class StationViewModel
         }
         catch { if (!ReferenceEquals(recipe, loadedRecipe)) recipe.Dispose(); throw; }
         loadedRecipe = recipe;
+        OnPropertyChanged(nameof(CameraInputNotice));
+        RunCommand.NotifyCanExecuteChanged();
         activeBatch = null;
         passedFirstArticle = null;
         UpdateBatchDisplay();
@@ -145,6 +147,8 @@ public sealed partial class StationViewModel
             activeBatch = null;
             passedFirstArticle = null;
             loadedRecipe = null;
+            OnPropertyChanged(nameof(CameraInputNotice));
+            RunCommand.NotifyCanExecuteChanged();
             UpdateBatchDisplay();
             SelectRecipeSamples(replaySamples);
             RecipeNotice = "已明确切换至开发参数，工程回放不计入生产批次。";

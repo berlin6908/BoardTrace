@@ -83,6 +83,7 @@ export const purposeLabels: Record<InspectionPurpose, string> = {
 export function sourceLabel(kind: string): string {
   if (kind === 'Replay') return '数据集回放 · 模拟'
   if (kind === 'ConstructedNormal') return '构造正常 · 模拟'
+  if (kind === 'Camera') return '相机实拍'
   return kind
 }
 

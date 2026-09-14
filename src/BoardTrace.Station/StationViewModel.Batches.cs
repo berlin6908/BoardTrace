@@ -103,6 +103,8 @@ public sealed partial class StationViewModel
         try { coordinator.RestoreCachedBatchRecipe(recipe); }
         catch { recipe.Dispose(); throw; }
         loadedRecipe = recipe;
+        OnPropertyChanged(nameof(CameraInputNotice));
+        RunCommand.NotifyCanExecuteChanged();
         var allowed = recipe.SampleIds.ToHashSet(StringComparer.Ordinal);
         SelectRecipeSamples(replaySamples.Where(sample => allowed.Contains(sample.SampleId)).ToArray());
         await RefreshBatchStateAsync();
@@ -186,6 +188,8 @@ public sealed partial class StationViewModel
         }
         catch { if (!ReferenceEquals(recipe, loadedRecipe)) recipe.Dispose(); throw; }
         loadedRecipe = recipe;
+        OnPropertyChanged(nameof(CameraInputNotice));
+        RunCommand.NotifyCanExecuteChanged();
         SelectRecipeSamples(samples);
         await RefreshBatchStateAsync();
         BatchNotice = BatchStateText;

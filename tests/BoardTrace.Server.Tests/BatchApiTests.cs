@@ -136,7 +136,7 @@ public sealed partial class BatchApiTests
         await server.Execute($"DELETE FROM InspectionImages WHERE InspectionId='{missingImage.Id}' AND Kind='reference'");
         await server.Status(server.Quality.PutAsJsonAsync($"/api/batches/{batch.Batch.Id}/first-article-approval", new ApproveFirstArticleRequest(missingImage.Id)), HttpStatusCode.Conflict);
         var pass = server.Record(batch, InspectionPurpose.FirstArticle);
-        var second = server.Record(batch, InspectionPurpose.FirstArticle);
+        var second = server.Record(batch, InspectionPurpose.FirstArticle) with { SourceKind = "Camera" };
         await server.Upload(pass); await server.Upload(second);
         await server.Status(server.Operator.PutAsJsonAsync($"/api/batches/{batch.Batch.Id}/first-article-approval", new ApproveFirstArticleRequest(pass.Id)), HttpStatusCode.Forbidden);
         var approvals = await Task.WhenAll(new[] { pass.Id, second.Id }.Select(id => server.Quality.PutAsJsonAsync($"/api/batches/{batch.Batch.Id}/first-article-approval", new ApproveFirstArticleRequest(id))));
@@ -150,6 +150,7 @@ public sealed partial class BatchApiTests
         Assert.Equal(approved, details.Approval);
         Assert.Equal(5, details.FirstArticles.Count);
         Assert.Contains(details.FirstArticles, row => row.Id == pass.Id && row.SourceKind == "ConstructedNormal");
+        Assert.Contains(details.FirstArticles, row => row.Id == second.Id && row.SourceKind == "Camera");
         Assert.Equal(0, details.ReceivedProductionCount);
     }
 
@@ -194,6 +195,7 @@ public sealed partial class BatchApiTests
             production with { Id = Guid.NewGuid(), RecipeJson = "{}" },
             production with { Id = Guid.NewGuid(), SampleId = "foreign-sample" },
             production with { Id = Guid.NewGuid(), SourceKind = "UnmarkedNormal" },
+            production with { Id = Guid.NewGuid(), ControllerSessionId = Guid.NewGuid(), TriggerSequence = 1 },
             production with { Id = Guid.NewGuid(), ExecutionSessionId = Guid.NewGuid() },
             production with { Id = Guid.NewGuid(), OperatorName = "another operator" },
             production with { Id = Guid.NewGuid(), ProductionSequence = 3 },

@@ -27,7 +27,9 @@ public static class BatchInspectionGate
             snapshot.BundleHash != batch.RecipeBundleHash || PublishedRecipeTransfer.Hash(snapshot.Bundle) != batch.RecipeBundleHash)
             return "检测方案包与批次固定包不符。";
         var reference = snapshot.Bundle.References.SingleOrDefault(reference => reference.SampleId == record.SampleId);
-        if (reference is null || record.SourceKind is not ("Replay" or "ConstructedNormal")) return "检测样本或模拟来源不属于允许的固定输入。";
+        if (reference is null || record.SourceKind is not ("Replay" or "ConstructedNormal" or "Camera")) return "检测样本或采集来源不属于允许的固定输入。";
+        if (record.SourceKind == "ConstructedNormal" && record.ControllerSessionId is not null)
+            return "PLC 触发不能使用构造正常输入。";
         if (record.ReferenceImage is not null && (record.ReferenceImage.Length != reference.ByteLength ||
             Convert.ToHexStringLower(SHA256.HashData(record.ReferenceImage)) != reference.Sha256)) return "检测参考图与已发布资产不符。";
         if (record.Purpose == InspectionPurpose.FirstArticle)

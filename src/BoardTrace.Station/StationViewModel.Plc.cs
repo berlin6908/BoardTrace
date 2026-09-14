@@ -33,7 +33,7 @@ public sealed partial class StationViewModel
         StopPlcCommand = new AsyncRelayCommand(StopPlcAsync, () => plcRunning);
     }
 
-    private bool CanAcceptPlc() => CanEdit && !coordinator.IsFaulted && (IsReinspectionMode ? CanContinueReinspection() : CanContinueProduction());
+    private bool CanAcceptPlc() => CanEdit && CanUseInputSource && !coordinator.IsFaulted && (IsReinspectionMode ? CanContinueReinspection() : CanContinueProduction());
 
     private void StartPlc()
     {
@@ -115,7 +115,7 @@ public sealed partial class StationViewModel
             // PLC selects an input asset. The UI's constructed-normal switch does
             // not alter a device-triggered production image.
             var result = await coordinator.InspectAsync(purpose, StationId, input.ProductId, actor,
-                CreateReplaySource(sample, false), new Progress<string>(stage => Status = stage), token, input.Identity, accepted);
+                CreateSelectedSource(sample, false), new Progress<string>(stage => Status = stage), token, input.Identity, accepted);
             ShowRecord(result);
             Status = result.ExecutionStatus == InspectionExecution.Completed ? "检测完成 · 已保存" : "执行失败 · 已保存";
             Notice = result.Error ?? "本地档案已提交，等待 PLC 确认并同步中央。";

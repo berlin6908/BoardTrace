@@ -80,7 +80,7 @@ public sealed partial class StationViewModel : ObservableObject, IAsyncDisposabl
         coordinator = new InspectionCoordinator(store, new ClassicalSettings());
         uploadClient = StationAuthentication.CreateClient(options.ServerUrl);
         batchDeviceClient = StationAuthentication.CreateClient(options.ServerUrl);
-        RunCommand = new AsyncRelayCommand(RunAsync, () => CanEdit && !plcRunning && CanRunInspection && !coordinator.IsFaulted && SelectedSample != null && !string.IsNullOrWhiteSpace(ProductId));
+        RunCommand = new AsyncRelayCommand(RunAsync, () => CanEdit && !plcRunning && CanRunInspection && CanUseInputSource && !coordinator.IsFaulted && SelectedSample != null && !string.IsNullOrWhiteSpace(ProductId));
         ViewHistoryCommand = new AsyncRelayCommand(ViewHistoryAsync, () => SelectedHistory != null && CanViewHistory);
         SignOutCommand = new AsyncRelayCommand(SignOutAsync, () => !stopping && !signingOut);
         InitializeRecipeCommands();
@@ -153,7 +153,7 @@ public sealed partial class StationViewModel : ObservableObject, IAsyncDisposabl
     };
     public string DefectCount => current?.ExecutionStatus == InspectionExecution.Completed ? current.Defects.Count.ToString() : "—";
     public string DetectionTime => current?.DetectionMs is double ms ? $"{ms:F1} ms" : "—";
-    public string ResultCaption => current is null ? "尚未选择检测档案" : $"{current.ProductId} · {(current.Purpose == InspectionPurpose.FirstArticle ? "首件" : current.Purpose == InspectionPurpose.Production ? $"生产 #{current.ProductionSequence}" : current.Purpose == InspectionPurpose.Reinspection ? "返工复检" : "工程回放")} · 样本 {current.SampleId} · {(current.SourceKind == "ConstructedNormal" ? "构造正常输入" : "数据集回放")} · 操作员 {current.OperatorName}";
+    public string ResultCaption => current is null ? "尚未选择检测档案" : $"{current.ProductId} · {(current.Purpose == InspectionPurpose.FirstArticle ? "首件" : current.Purpose == InspectionPurpose.Production ? $"生产 #{current.ProductionSequence}" : current.Purpose == InspectionPurpose.Reinspection ? "返工复检" : "工程回放")} · 样本 {current.SampleId} · {(current.SourceKind == "ConstructedNormal" ? "构造正常输入" : current.SourceKind == "Camera" ? "相机实拍" : "数据集回放")} · 操作员 {current.OperatorName}";
     public string InspectionId => current?.Id.ToString() ?? "等待检测";
 
     public static string DecisionLabel(QualityDecision decision) => decision switch
@@ -244,7 +244,7 @@ public sealed partial class StationViewModel : ObservableObject, IAsyncDisposabl
         if (stopping || signingOut || sessionExpired || currentOperator is null || operatorClient is null) return;
         var sample = SelectedSample!;
         var product = ProductId.Trim();
-        var source = CreateReplaySource(sample, ConstructedNormal);
+        var source = CreateSelectedSource(sample, ConstructedNormal);
         var purpose = IsReinspectionMode ? InspectionPurpose.Reinspection : activeBatch is null ? InspectionPurpose.EngineeringReplay
             : activeBatch.Status == BatchStatus.AwaitingFirstArticle ? InspectionPurpose.FirstArticle : InspectionPurpose.Production;
         SelectedHistory = null;
@@ -449,6 +449,9 @@ public sealed partial class StationViewModel : ObservableObject, IAsyncDisposabl
         OnPropertyChanged(nameof(OperatorName));
         OnPropertyChanged(nameof(SessionButtonText));
         OnPropertyChanged(nameof(CanEdit));
+        OnPropertyChanged(nameof(CanEditCaptureSource));
+        OnPropertyChanged(nameof(CanEditCameraIndex));
+        OnPropertyChanged(nameof(CanConstructNormal));
         RunCommand.NotifyCanExecuteChanged();
         ViewHistoryCommand.NotifyCanExecuteChanged();
         SignOutCommand.NotifyCanExecuteChanged();

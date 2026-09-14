@@ -44,6 +44,29 @@ public sealed class PublishedInspectionCoordinatorTests
     private static string Hash(byte[] bytes) => Convert.ToHexStringLower(SHA256.HashData(bytes));
     private static ReplaySample Sample(string id = "controlled-1") => new(id, "tested.png", "reference.png");
 
+    private sealed class FailedCameraFrame : IImageSource
+    {
+        public string SampleId => "controlled-1";
+        public string SourceKind => "Camera";
+        public Task<CapturedPair> CaptureAsync(CancellationToken cancellationToken) => throw new IOException("相机未返回图像帧。");
+    }
+
+    [Fact]
+    public async Task CameraCaptureFailureKeepsTheStartedArchiveWithoutAQualityDecision()
+    {
+        var f = Setup();
+        using var coordinator = new InspectionCoordinator(f.Store, new ClassicalSettings());
+        coordinator.UsePublishedRecipe(f.Loaded);
+        var result = await coordinator.InspectAsync(InspectionPurpose.EngineeringReplay, "ST-1", "CAMERA-FAIL", Operator, new FailedCameraFrame());
+        var archived = f.Store.Get(result.Id)!;
+        Assert.Equal("Camera", archived.SourceKind);
+        Assert.Equal(InspectionExecution.Failed, archived.ExecutionStatus);
+        Assert.Equal(QualityDecision.NotEvaluated, archived.Decision);
+        Assert.Contains("相机未返回", archived.Error);
+        Assert.Equal(1, f.Store.PendingCount());
+        Assert.False(coordinator.IsFaulted);
+    }
+
     [Fact]
     public async Task PublishedInspectionArchivesActualCachedReferenceAndFullVersionAfterSourceReferenceDeletion()
     {

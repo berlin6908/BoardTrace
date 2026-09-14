@@ -78,6 +78,7 @@ onBeforeUnmount(() => detailRequest?.abort())
       <strong>{{ sourceLabel(record.sourceKind) }}</strong>
       <span v-if="record.sourceKind === 'ConstructedNormal'">参考图构造输入，仅验证检测流程，不代表真实良品。</span>
       <span v-else-if="record.sourceKind === 'Replay'">公开数据驱动的模拟记录，判定由图像算法产生。</span>
+      <span v-else-if="record.sourceKind === 'Camera'">相机采集原图，参考图来自该批次的固定发布方案。</span>
     </div>
 
     <ElAlert v-if="record.error" class="execution-error" :title="executionLabels[record.executionStatus]" :description="record.error" type="error" show-icon :closable="false" />

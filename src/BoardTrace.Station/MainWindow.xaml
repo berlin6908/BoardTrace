@@ -30,12 +30,20 @@
                         <TextBlock Text="{Binding BatchStateText}" FontWeight="SemiBold" Foreground="#087F82" TextWrapping="Wrap" Margin="0,0,0,6" />
                         <TextBlock Text="{Binding BatchProgress}" FontSize="11" Foreground="#687B86" TextWrapping="Wrap" Margin="0,0,0,16" />
                         <StackPanel IsEnabled="{Binding CanEdit}">
+                            <TextBlock Text="图像输入" Margin="0,0,0,7" />
+                            <ComboBox ItemsSource="{Binding InputSources}" SelectedItem="{Binding SelectedInputSource}"
+                                      Height="36" AutomationProperties.Name="图像输入" IsEnabled="{Binding CanEditCaptureSource}" />
+                            <TextBlock Text="相机设备序号（从 0 开始）" Margin="0,12,0,7" />
+                            <TextBox Text="{Binding CameraDeviceIndex, UpdateSourceTrigger=PropertyChanged}" AutomationProperties.Name="相机设备序号"
+                                     IsEnabled="{Binding CanEditCameraIndex}" />
+                            <TextBlock Text="{Binding CameraInputNotice}"
+                                       TextWrapping="Wrap" FontSize="11" Foreground="#687B86" Margin="0,5,0,12" />
                             <TextBlock Text="输入样本" Margin="0,0,0,7" />
                             <ComboBox ItemsSource="{Binding Samples}" SelectedItem="{Binding SelectedSample}" DisplayMemberPath="SampleId"
                                       Height="36" AutomationProperties.Name="输入样本" IsTextSearchEnabled="True" IsEnabled="{Binding CanEditInspectionInput}" />
                             <TextBlock Text="模拟产品编号" Margin="0,18,0,7" />
                             <TextBox Text="{Binding ProductId, UpdateSourceTrigger=PropertyChanged}" AutomationProperties.Name="模拟产品编号" IsEnabled="{Binding CanEditInspectionInput}" />
-                            <CheckBox IsChecked="{Binding ConstructedNormal}" Content="使用参考图构造正常输入" Margin="0,18,0,8" />
+                            <CheckBox IsChecked="{Binding ConstructedNormal}" IsEnabled="{Binding CanConstructNormal}" Content="使用参考图构造正常输入" Margin="0,18,0,8" />
                             <TextBlock Text="构造输入只验证流程，不代表真实良品。" TextWrapping="Wrap" FontSize="11" Foreground="#687B86" />
                         </StackPanel>
                         <Button Content="{Binding RunButtonText}" Command="{Binding RunCommand}" Background="#087F82" Foreground="White" FontWeight="SemiBold" Margin="0,22,0,0" />
