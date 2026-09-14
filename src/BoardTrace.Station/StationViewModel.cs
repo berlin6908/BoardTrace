@@ -50,6 +50,7 @@ public sealed partial class StationViewModel : ObservableObject, IAsyncDisposabl
     private readonly CancellationTokenSource uploadCancellation = new();
     private readonly SemaphoreSlim historyRefresh = new(1, 1);
     private Task? uploadTask;
+    private DateTimeOffset nextImageCleanup;
     private Task? initializationTask;
     private Task? shutdownTask;
     private bool stopping;
@@ -306,7 +307,7 @@ public sealed partial class StationViewModel : ObservableObject, IAsyncDisposabl
                     {
                         case UploadConnection.Connected:
                             UploadStatus = "最近同步成功";
-                            UploadNotice = $"{DateTime.Now:HH:mm:ss} 中央已确认，本地原件继续保留。";
+                            UploadNotice = $"{DateTime.Now:HH:mm:ss} 中央已确认，本地图片至少保留 7 天。";
                             if (result.Pending > 0) delay = TimeSpan.FromMilliseconds(200);
                             break;
                         case UploadConnection.Unavailable:
@@ -324,6 +325,7 @@ public sealed partial class StationViewModel : ObservableObject, IAsyncDisposabl
                     }
                     else if (result.Error != null && previousNotice != UploadNotice) AddEvent(UploadNotice);
                     if (result.Uploaded > 0 || result.Pending != PendingCount) await RefreshHistoryAsync();
+                    await CleanupImagesAsync();
                 }
                 catch (Exception error) when (error is not OperationCanceledException)
                 {
@@ -336,6 +338,21 @@ public sealed partial class StationViewModel : ObservableObject, IAsyncDisposabl
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+    }
+
+    private async Task CleanupImagesAsync()
+    {
+        var now = DateTimeOffset.UtcNow;
+        if (now < nextImageCleanup || stopping) return;
+        nextImageCleanup = now.AddDays(1);
+        try
+        {
+            var count = await Task.Run(() => store.PurgeAcknowledgedImages(now));
+            if (count == 0) return;
+            nextImageCleanup = now.AddSeconds(5);
+            AddEvent($"已清理 {count} 条中央确认满 7 天的本地图片；原判与触发编号继续保留。");
+        }
+        catch (Exception error) { AddEvent("本地图片清理未完成：" + error.Message); }
     }
 
     public ValueTask DisposeAsync() => new(shutdownTask ??= ShutdownAsync());
@@ -464,9 +481,11 @@ public sealed partial class StationViewModel : ObservableObject, IAsyncDisposabl
         var id = SelectedHistory!.Id;
         try
         {
-            var record = await Task.Run(() => store.Get(id));
-            ShowRecord(record);
-            Notice = record?.Error ?? "正在查看本地档案。历史判定保持原样。";
+            var archive = await Task.Run(() => store.ReadArchive(id));
+            ShowRecord(archive?.Record);
+            Notice = archive?.ImagesPurgedAt is not null
+                ? "本地图片已过保留期，完整原图可在中央追溯查看。原判、缺陷与检测编号保持原样。"
+                : archive?.Record.Error ?? "正在查看本地档案。历史判定保持原样。";
         }
         catch (Exception error) { Notice = "读取档案失败：" + error.Message; }
     }
@@ -477,7 +496,7 @@ public sealed partial class StationViewModel : ObservableObject, IAsyncDisposabl
         TestedImage = Decode(record?.TestedImage);
         ReferenceImage = Decode(record?.ReferenceImage);
         DefectOverlays.Clear();
-        if (record != null)
+        if (record != null && TestedImage is not null)
             foreach (var defect in record.Defects)
                 DefectOverlays.Add(new DefectOverlay(defect.Box[0], defect.Box[1], defect.Box[2] - defect.Box[0], defect.Box[3] - defect.Box[1]));
         foreach (var property in new[] { nameof(Decision), nameof(DecisionBrush), nameof(DefectCount), nameof(DetectionTime), nameof(ResultCaption), nameof(InspectionId) })

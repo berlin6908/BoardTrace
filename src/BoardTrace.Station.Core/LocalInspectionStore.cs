@@ -60,6 +60,7 @@ public sealed partial class LocalInspectionStore(string databasePath)
         command.ExecuteNonQuery();
         InitializeBatches(connection);
         InitializePlc(connection);
+        InitializeImageRetention(connection);
     }
 
     // Images live only in their BLOB columns, never duplicated as base64 in the document.
@@ -99,7 +100,10 @@ public sealed partial class LocalInspectionStore(string databasePath)
     {
         using var connection = Open();
         using var command = connection.CreateCommand();
-        command.CommandText = "SELECT Document, TestedImage, ReferenceImage FROM Inspections WHERE Id=$id;";
+        command.CommandText = """
+            SELECT i.Document,i.TestedImage,i.ReferenceImage,p.PurgedAt FROM Inspections i
+            LEFT JOIN LocalImagePurges p ON p.InspectionId=i.Id WHERE i.Id=$id;
+            """;
         command.Parameters.AddWithValue("$id", id.ToString());
         using var reader = command.ExecuteReader();
         if (!reader.Read()) return null;
@@ -107,6 +111,13 @@ public sealed partial class LocalInspectionStore(string databasePath)
     }
 
     private static InspectionRecord ReadRecord(SqliteDataReader reader)
+    {
+        if (!reader.IsDBNull(3))
+            throw new InvalidOperationException("本地图像已按保留期清理，请通过中央追溯查看完整档案。");
+        return ReadImageRecord(reader);
+    }
+
+    private static InspectionRecord ReadImageRecord(SqliteDataReader reader)
     {
         var record = JsonSerializer.Deserialize<InspectionRecord>(reader.GetString(0), Json)!;
         return record with
@@ -141,8 +152,9 @@ public sealed partial class LocalInspectionStore(string databasePath)
         using var connection = Open();
         using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT i.Document, i.TestedImage, i.ReferenceImage FROM Inspections i
+            SELECT i.Document, i.TestedImage, i.ReferenceImage, p.PurgedAt FROM Inspections i
             JOIN UploadState u ON i.Id=u.InspectionId
+            LEFT JOIN LocalImagePurges p ON p.InspectionId=i.Id
             ORDER BY i.StartedAt, i.rowid LIMIT $limit;
             """;
         command.Parameters.AddWithValue("$limit", limit);
@@ -159,8 +171,9 @@ public sealed partial class LocalInspectionStore(string databasePath)
         using var read = connection.CreateCommand();
         read.Transaction = transaction;
         read.CommandText = """
-            SELECT i.Document, i.TestedImage, i.ReferenceImage FROM Inspections i
-            JOIN UploadState u ON i.Id=u.InspectionId WHERE i.Id=$id;
+            SELECT i.Document, i.TestedImage, i.ReferenceImage, p.PurgedAt FROM Inspections i
+            JOIN UploadState u ON i.Id=u.InspectionId
+            LEFT JOIN LocalImagePurges p ON p.InspectionId=i.Id WHERE i.Id=$id;
             """;
         read.Parameters.AddWithValue("$id", receipt.InspectionId.ToString());
         InspectionRecord record;

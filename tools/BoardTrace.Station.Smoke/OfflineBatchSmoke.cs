@@ -239,14 +239,55 @@ public static partial class Program
             finally { window.Close(); }
         }
         var store = new LocalInspectionStore(options.DatabasePath);
+        var beforePurge = store.Get(firstProduction)!;
+        var originalReceipt = store.ReadArchive(firstProduction)!.Receipt!;
+        var beforeCount = store.ReadRecent().Count;
+        using (var connection = new SqliteConnection($"Data Source={options.DatabasePath}"))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "UPDATE UploadReceipts SET AcknowledgedAt=$old WHERE InspectionId=$id;";
+            command.Parameters.AddWithValue("$old", DateTimeOffset.UtcNow.AddDays(-8).ToUnixTimeMilliseconds());
+            command.Parameters.AddWithValue("$id", firstProduction.ToString());
+            Require(command.ExecuteNonQuery() == 1, "Fixture could not backdate the local acknowledgment for retention testing.");
+        }
+        fixture.Mode = BatchUiNetwork.Online;
+        await using (var model = new StationViewModel(archiveOptions, null, null, false))
+        {
+            var window = new MainWindow { DataContext = model };
+            window.Show();
+            try
+            {
+                await model.InitializeAsync();
+                await AwaitBatchUiAsync(() => store.ReadArchive(firstProduction)?.ImagesPurgedAt is not null,
+                    "natural upload-loop image retention cleanup");
+                var retained = store.ReadArchive(firstProduction)!;
+                Require(retained.Record.Id == beforePurge.Id && retained.Record.Decision == beforePurge.Decision
+                    && retained.Record.Defects.Count == beforePurge.Defects.Count && retained.Receipt == originalReceipt
+                    && retained.Record.TestedImage is null && retained.Record.ReferenceImage is null && store.PendingCount() == 0
+                    && store.ReadRecent().Count == beforeCount && !model.RunCommand.CanExecute(null),
+                    "Retention cleanup lost original metadata/receipt, left image BLOBs, or accepted a new inspection.");
+                model.SelectedHistory = model.History.Single(row => row.Id == firstProduction);
+                Require(model.ViewHistoryCommand.CanExecute(null), "Purged archive was not selectable without personnel login.");
+                await model.ViewHistoryCommand.ExecuteAsync(null);
+                Require(model.InspectionId == firstProduction.ToString() && model.Decision == StationViewModel.DecisionLabel(beforePurge.Decision)
+                    && model.DefectCount == beforePurge.Defects.Count.ToString() && model.TestedImage is null && model.ReferenceImage is null
+                    && model.DefectOverlays.Count == 0 && model.Notice.Contains("中央追溯", StringComparison.Ordinal),
+                    "WPF did not show the preserved verdict/defect count with empty images and central trace notice.");
+                await SnapshotAsync(window, Path.Combine(output, "04-retained-archive.png"));
+            }
+            finally { window.Close(); }
+        }
         await File.WriteAllTextAsync(Path.Combine(output, "offline-result.json"), JsonSerializer.Serialize(new
         {
             fixtureKind = "isolated HTTP batch fixture, not a quality-approved SQL publication",
             firstArticle, firstProduction, records = store.ReadRecent().Count,
             pending = store.PendingCount(), received = fixture.Records.Keys.Order().ToArray(),
+            imagePurgedAt = store.ReadArchive(firstProduction)!.ImagesPurgedAt,
             checks = new[] { "independent WPF process DPAPI and Cookie resume", "same bounded operator session", "real image production during disconnect",
                 "reconnect uploads original bytes", "401 revokes local resume", "fresh login clears old session before a missing manifest fails",
-                "archive-only reads original image pair and verdict", "failed local clear cannot SignIn", "archive-only PLC start remains available without production authority" }
+                "archive-only reads original image pair and verdict", "failed local clear cannot SignIn", "archive-only PLC start remains available without production authority",
+                "natural upload-loop retention removes only aged acknowledged BLOBs and WPF preserves the archived verdict" }
         }, json));
     }
 
