@@ -34,11 +34,11 @@ public static partial class Program
         var settings = new RecipeClassicalSettings(127, 1, 8, 3, 4, 12, 0.1);
         var targets = new RecipeTargets(0.99, 0.99, 100);
         var bundle = new PublishedRecipeBundle(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "UI 缓存夹具 · 非质量发布",
-            "Classical", settings, targets, targets, new(640, 640, true),
+            new ClassicalRecipeDefinition(settings), targets, targets, new(640, 640, true),
             Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(typeof(ClassicalDetector).Assembly.Location))),
             new string('1', 64), new string('2', 64),
             [new(sample.SampleId, assets.Keys.Single(), Convert.ToHexStringLower(SHA256.HashData(reference)), reference.Length)],
-            "ui-fixture", "隔离 UI 夹具", DateTimeOffset.UtcNow);
+            null, "ui-fixture", "隔离 UI 夹具", DateTimeOffset.UtcNow);
         var version = new PublishedRecipeVersion(bundle, PublishedRecipeTransfer.Hash(bundle));
         var cache = new LocalRecipeStore(options.DatabasePath);
         cache.Initialize();

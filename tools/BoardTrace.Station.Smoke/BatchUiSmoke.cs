@@ -248,10 +248,10 @@ public static partial class Program
             available.Stop();
             Address = new Uri($"http://127.0.0.1:{port}/");
             var targets = new RecipeTargets(0.99, 0.99, 100);
-            var bundle = new PublishedRecipeBundle(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "隔离批次 UI 夹具 · 非质量发布", "Classical",
-                new RecipeClassicalSettings(BoxPadding: 4), targets, targets, new(640, 640, true),
+            var bundle = new PublishedRecipeBundle(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "隔离批次 UI 夹具 · 非质量发布",
+                new ClassicalRecipeDefinition(new RecipeClassicalSettings(BoxPadding: 4)), targets, targets, new(640, 640, true),
                 BatchUiHash(File.ReadAllBytes(typeof(ClassicalDetector).Assembly.Location)), new string('3', 64), new string('4', 64),
-                [new(sampleId, Guid.NewGuid(), BatchUiHash(reference), reference.Length)], "fixture-engineer", "隔离 UI 夹具", DateTimeOffset.UtcNow);
+                [new(sampleId, Guid.NewGuid(), BatchUiHash(reference), reference.Length)], null, "fixture-engineer", "隔离 UI 夹具", DateTimeOffset.UtcNow);
             Version = new(bundle, PublishedRecipeTransfer.Hash(bundle));
             Batch = new(Guid.NewGuid(), "SIM-UI-BATCH", "PCB", "TOP", 5, "BATCH-UI-STATION", bundle.VersionId, Version.BundleHash,
                 "fixture-engineer", "隔离 UI 夹具", DateTimeOffset.UtcNow);

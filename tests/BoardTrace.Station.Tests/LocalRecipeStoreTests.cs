@@ -26,11 +26,11 @@ public sealed class LocalRecipeStoreTests
         var assets = new Dictionary<Guid, byte[]> { [Guid.NewGuid()] = first.ToBytes(".png"), [Guid.NewGuid()] = second.ToBytes(".png") };
         var references = assets.Select((asset, index) => new PublishedRecipeReference($"sample-{index}", asset.Key,
             Hash(asset.Value), asset.Value.Length)).ToArray();
-        var bundle = new PublishedRecipeBundle(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "Typed unit fixture", "Classical",
-            new RecipeClassicalSettings(BoxPadding: 4), new RecipeTargets(0.99, 0.99, 100), new RecipeTargets(0.99, 0.99, 100),
+        var bundle = new PublishedRecipeBundle(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "Typed unit fixture",
+            new ClassicalRecipeDefinition(new RecipeClassicalSettings(BoxPadding: 4)), new RecipeTargets(0.99, 0.99, 100), new RecipeTargets(0.99, 0.99, 100),
             new PublishedRecipeInput(640, 640, true),
             Hash(File.ReadAllBytes(typeof(ClassicalDetector).Assembly.Location)), new string('a', 64), new string('b', 64),
-            references, "fixture-engineer", "Fixture Engineer", DateTimeOffset.UtcNow);
+            references, null, "fixture-engineer", "Fixture Engineer", DateTimeOffset.UtcNow);
         return (store, new PublishedRecipeVersion(bundle, PublishedRecipeTransfer.Hash(bundle)), assets);
     }
 
@@ -154,7 +154,8 @@ public sealed class LocalRecipeStoreTests
     public void UnsupportedAlgorithmInputAndDifferentAssemblyAreRejected()
     {
         var (store, version, assets) = Setup();
-        Assert.Throws<InvalidDataException>(() => store.Save(Version(version.Bundle with { Algorithm = "Onnx" }), assets));
+        Assert.Throws<InvalidDataException>(() => store.Save(Version(version.Bundle with
+        { Definition = new PairedOnnxRecipeDefinition(new string('a', 64), new(0.5, 0.5, 0.5, 0.5, 0.5, 0.5)) }), assets));
         Assert.Throws<InvalidDataException>(() => store.Save(Version(version.Bundle with { Input = new PublishedRecipeInput(320, 320, false) }), assets));
         var differentAssembly = Version(version.Bundle with { AlgorithmAssemblySha256 = new string('0', 64) });
         store.Save(differentAssembly, assets);

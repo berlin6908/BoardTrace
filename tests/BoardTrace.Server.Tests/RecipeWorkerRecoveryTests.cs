@@ -199,12 +199,15 @@ public sealed class RecipeWorkerRecoveryTests(ITestOutputHelper output)
             try
             {
                 await server.CreateImages();
-                await using (var db = server.Context())
+                // Schema preparation is outside the injected outage. Do not use the
+                // observer's one-second login/two-second command budget for database DDL.
+                await using (var db = new BoardTraceDbContext(new DbContextOptionsBuilder<BoardTraceDbContext>()
+                    .UseSqlServer(new SqlConnectionStringBuilder(server.Connection) { ConnectTimeout = 15 }.ConnectionString).Options))
                 {
                     await db.Database.EnsureCreatedAsync();
                     server.draftId = Guid.NewGuid();
                     db.RecipeDrafts.Add(new RecipeDraft { Id = server.draftId, Name = "isolated recovery fixture",
-                        SettingsJson = JsonSerializer.Serialize(new RecipeClassicalSettings()),
+                        DefinitionJson = JsonSerializer.Serialize<RecipeDefinition>(new ClassicalRecipeDefinition(new RecipeClassicalSettings())),
                         TargetsJson = JsonSerializer.Serialize(new RecipeTargets(0, 0, 10000)),
                         DataManifestSha256 = server.inputHash, SnapshotHash = new string('a', 64),
                         AuthorId = "isolated-worker-test", UpdatedAt = DateTimeOffset.UtcNow });
@@ -234,7 +237,7 @@ public sealed class RecipeWorkerRecoveryTests(ITestOutputHelper output)
             var id = Guid.NewGuid();
             await using var db = Context();
             db.ValidationRuns.Add(new ValidationRun { Id = id, DraftId = draftId, Status = status,
-                Name = "isolated recovery fixture", SettingsJson = JsonSerializer.Serialize(new RecipeClassicalSettings()),
+                Name = "isolated recovery fixture", DefinitionJson = JsonSerializer.Serialize<RecipeDefinition>(new ClassicalRecipeDefinition(new RecipeClassicalSettings())),
                 TargetsJson = JsonSerializer.Serialize(new RecipeTargets(0, 0, 10000)), SnapshotHash = new string('a', 64),
                 ManifestHash = inputHash, TruthHash = truthHash, Total = 200, CreatedAt = DateTimeOffset.UtcNow });
             await db.SaveChangesAsync();

@@ -12,14 +12,15 @@ namespace BoardTrace.Station;
 
 public sealed record RecipeChoice(PublishedRecipeSummary Summary, bool Cached)
 {
-    public string Label => $"{Summary.Name} · {Summary.PublishedAt.LocalDateTime:MM-dd HH:mm}{(Cached ? " · 已缓存" : "")}";
+    public string Label => $"{Summary.Name} · {Summary.Algorithm} · {Summary.PublishedAt.LocalDateTime:MM-dd HH:mm}{(Cached ? " · 已缓存" : "")}";
 }
 
 public sealed partial class StationViewModel
 {
     private readonly List<ReplaySample> replaySamples = [];
     private LocalRecipeStore recipeStore = null!;
-    private LoadedClassicalRecipe? loadedRecipe;
+    // Borrowed from coordinator after a successful handover; never disposed by the view model.
+    private LoadedRecipe? loadedRecipe;
     private RecipeChoice? selectedRecipe;
     private IReadOnlyList<PublishedRecipeSummary> centralRecipes = [];
     private string recipeNotice = "刷新可查看中央已发布版本。";
@@ -29,7 +30,7 @@ public sealed partial class StationViewModel
     public AsyncRelayCommand DownloadRecipeCommand { get; private set; } = null!;
     public AsyncRelayCommand LoadCachedRecipeCommand { get; private set; } = null!;
     public RelayCommand UseDevelopmentRecipeCommand { get; private set; } = null!;
-    public string ActiveRecipeName => loadedRecipe?.Name ?? "经典图像差分 · 开发参数";
+    public string ActiveRecipeName => loadedRecipe is { } recipe ? $"{recipe.Name} · {recipe.Algorithm}" : "经典图像差分 · 开发参数";
     public string ActiveRecipeIdentity => loadedRecipe?.VersionId.ToString() ?? "640 × 640 · 参考图配准";
     public string RecipeNotice { get => recipeNotice; private set => SetProperty(ref recipeNotice, value); }
     public RecipeChoice? SelectedRecipe
@@ -98,7 +99,7 @@ public sealed partial class StationViewModel
     private async Task DownloadRecipeAsync()
     {
         var selected = SelectedRecipe!;
-        RecipeNotice = "正在下载并校验完整方案与参考图…";
+        RecipeNotice = "正在下载并校验完整方案资产…";
         try
         {
             var recipe = await new PublishedRecipeDownloader(recipeStore, operatorClient!).DownloadAsync(selected.Summary.Id, uploadCancellation.Token);
@@ -111,21 +112,26 @@ public sealed partial class StationViewModel
     private async Task LoadCachedRecipeAsync()
     {
         var versionId = SelectedRecipe!.Summary.Id;
-        RecipeNotice = "正在校验本地方案与参考图…";
+        RecipeNotice = "正在校验本地完整方案资产…";
         try { ApplyRecipe(await Task.Run(() => recipeStore.Load(versionId), uploadCancellation.Token)); }
         catch (Exception error) { RecipeOperationFailed("加载本地版本失败", error); }
     }
 
-    private void ApplyRecipe(LoadedClassicalRecipe recipe)
+    private void ApplyRecipe(LoadedRecipe recipe)
     {
-        var allowedSamples = recipe.SampleIds.ToHashSet(StringComparer.Ordinal);
-        var samples = replaySamples.Where(sample => allowedSamples.Contains(sample.SampleId)).ToArray();
-        if (samples.Length == 0) throw new InvalidDataException("该版本与当前回放清单没有共同样本。");
-        coordinator.UsePublishedRecipe(recipe);
+        ReplaySample[] samples;
+        try
+        {
+            var allowedSamples = recipe.SampleIds.ToHashSet(StringComparer.Ordinal);
+            samples = replaySamples.Where(sample => allowedSamples.Contains(sample.SampleId)).ToArray();
+            if (samples.Length == 0) throw new InvalidDataException("该版本与当前回放清单没有共同样本。");
+            coordinator.UsePublishedRecipe(recipe);
+        }
+        catch { if (!ReferenceEquals(recipe, loadedRecipe)) recipe.Dispose(); throw; }
+        loadedRecipe = recipe;
         activeBatch = null;
         passedFirstArticle = null;
         UpdateBatchDisplay();
-        loadedRecipe = recipe;
         SelectRecipeSamples(samples);
         RecipeNotice = "完整版本已加载。工程回放使用缓存参考图，检测档案绑定此版本。";
         AddEvent($"已加载方案 {recipe.Name} · {recipe.VersionId}。");

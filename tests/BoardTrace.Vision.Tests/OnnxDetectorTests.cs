@@ -22,7 +22,7 @@ public sealed class OnnxDetectorTests
     [Fact]
     public void UsesTestedReferenceAndAbsoluteDifferencePlanesWithoutRepeatingNormalization()
     {
-        using var detector = new OnnxDetector(ModelPath, ModelHash);
+        using var detector = new OnnxDetector(File.ReadAllBytes(ModelPath), ModelHash);
         var tested = Image(); var reference = Image(192, 32);
         var result = detector.Detect(tested, reference, AllCandidates);
         Assert.Equal("Fail", result.Decision);
@@ -44,7 +44,7 @@ public sealed class OnnxDetectorTests
     [Fact]
     public void InclusiveThresholdForEachClassDoesNotSuppressAnyOtherClass()
     {
-        using var detector = new OnnxDetector(ModelPath, ModelHash);
+        using var detector = new OnnxDetector(File.ReadAllBytes(ModelPath), ModelHash);
         var tested = Image(); var reference = Image(192, 32);
         var boundaries = detector.Detect(tested, reference, AllCandidates).Defects.Select(defect => defect.Score).ToArray();
         Assert.Equal(6, detector.Detect(tested, reference, OnnxScoreThresholds.FromClassOrder(boundaries)).Defects.Count);
@@ -62,7 +62,7 @@ public sealed class OnnxDetectorTests
     [Fact]
     public void SameSessionRunsAgainAfterEitherImageIsRejected()
     {
-        using var detector = new OnnxDetector(ModelPath, ModelHash);
+        using var detector = new OnnxDetector(File.ReadAllBytes(ModelPath), ModelHash);
         var tested = Image(); var reference = Image(192, 32);
         Assert.Throws<InvalidDataException>(() => detector.Detect([1, 2, 3], reference, AllCandidates));
         Assert.Throws<InvalidDataException>(() => detector.Detect(tested, [1, 2, 3], AllCandidates));
@@ -72,10 +72,12 @@ public sealed class OnnxDetectorTests
     }
 
     [Fact]
-    public void MissingOrDifferentModelFailsBeforeDetection()
+    public void MissingCorruptOrDifferentModelBytesFailBeforeDetection()
     {
-        Assert.Throws<FileNotFoundException>(() => new OnnxDetector(Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".onnx"), ModelHash));
-        Assert.Throws<InvalidDataException>(() => new OnnxDetector(ModelPath, new string('0', 64)));
+        Assert.Throws<ArgumentNullException>(() => new OnnxDetector(null!, ModelHash));
+        byte[] corrupt = [1, 2, 3];
+        Assert.Throws<InvalidDataException>(() => new OnnxDetector(corrupt, Convert.ToHexStringLower(SHA256.HashData(corrupt))));
+        Assert.Throws<InvalidDataException>(() => new OnnxDetector(File.ReadAllBytes(ModelPath), new string('0', 64)));
     }
 
     [Theory]
@@ -83,7 +85,7 @@ public sealed class OnnxDetectorTests
     [InlineData(true)]
     public void BothImagesRequireValidDimensionsAndContrast(bool invalidReference)
     {
-        using var detector = new OnnxDetector(ModelPath, ModelHash);
+        using var detector = new OnnxDetector(File.ReadAllBytes(ModelPath), ModelHash);
         using var small = new Mat(32, 32, MatType.CV_8UC1, Scalar.Black);
         using var blank = new Mat(640, 640, MatType.CV_8UC1, Scalar.White);
         var valid = Image();
@@ -95,7 +97,7 @@ public sealed class OnnxDetectorTests
     [Fact]
     public void CancellationAndDisposedSessionCannotProduceAResult()
     {
-        var detector = new OnnxDetector(ModelPath, ModelHash);
+        var detector = new OnnxDetector(File.ReadAllBytes(ModelPath), ModelHash);
         Assert.Throws<OperationCanceledException>(() => detector.Detect([], [], AllCandidates, new CancellationToken(true)));
         detector.Dispose(); detector.Dispose();
         Assert.Throws<ObjectDisposedException>(() => detector.Detect(Image(), Image(), AllCandidates));
@@ -108,7 +110,7 @@ public sealed class OnnxDetectorTests
     [InlineData(1.01)]
     public void RejectsInvalidClassThresholdBeforeInference(double threshold)
     {
-        using var detector = new OnnxDetector(ModelPath, ModelHash);
+        using var detector = new OnnxDetector(File.ReadAllBytes(ModelPath), ModelHash);
         Assert.Throws<ArgumentOutOfRangeException>(() => detector.Detect(Image(), Image(), new OnnxScoreThresholds(Mousebite: threshold)));
         Assert.Throws<ArgumentException>(() => OnnxScoreThresholds.FromClassOrder([0.5, 0.5]));
     }

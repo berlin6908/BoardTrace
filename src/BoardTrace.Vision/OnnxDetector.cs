@@ -24,11 +24,10 @@ public sealed class OnnxDetector : IDisposable
     /// <summary>Native session construction only; excludes file reading and hash verification.</summary>
     public double SessionInitializationMs { get; }
 
-    public OnnxDetector(string modelPath, string expectedSha256)
+    public OnnxDetector(byte[] model, string expectedSha256)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(modelPath);
+        ArgumentNullException.ThrowIfNull(model);
         ArgumentException.ThrowIfNullOrWhiteSpace(expectedSha256);
-        var model = File.ReadAllBytes(modelPath);
         ModelSha256 = Convert.ToHexStringLower(SHA256.HashData(model));
         if (!string.Equals(ModelSha256, expectedSha256, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("ONNX 模型 SHA-256 与指定版本不一致。");

@@ -7,15 +7,16 @@ using OpenCvSharp;
 
 namespace BoardTrace.Station.Core;
 
-public sealed class InspectionCoordinator
+public sealed class InspectionCoordinator : IDisposable
 {
     private readonly LocalInspectionStore store;
     private ClassicalDetector? developmentDetector;
-    private LoadedClassicalRecipe? publishedRecipe;
+    private LoadedRecipe? publishedRecipe;
     private string recipeJson = "";
     private string recipeId = "";
     private int busy;
     private volatile bool faulted;
+    private bool disposed;
 
     public InspectionCoordinator(LocalInspectionStore store, ClassicalSettings settings)
     {
@@ -23,49 +24,56 @@ public sealed class InspectionCoordinator
         SetDevelopmentRecipe(settings);
     }
 
-    private void SetDevelopmentRecipe(ClassicalSettings settings)
+    private void SetDevelopmentRecipe(ClassicalSettings settings, bool leaveBatch = false)
     {
         ArgumentNullException.ThrowIfNull(settings);
-        developmentDetector = new ClassicalDetector(settings);
+        var nextDetector = new ClassicalDetector(settings);
+        var nextJson = JsonSerializer.Serialize(settings, new JsonSerializerOptions(JsonSerializerDefaults.Web));
+        var nextId = "classical-" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(nextJson)));
+        if (leaveBatch) store.LeaveBatch();
+        var previous = publishedRecipe;
+        developmentDetector = nextDetector;
         publishedRecipe = null;
-        recipeJson = JsonSerializer.Serialize(settings, new JsonSerializerOptions(JsonSerializerDefaults.Web));
-        recipeId = "classical-" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(recipeJson)));
+        recipeJson = nextJson;
+        recipeId = nextId;
+        previous?.Dispose();
     }
 
-    public void UseDevelopmentRecipe(ClassicalSettings settings) => ChangeWhileIdle(() =>
-    {
-        store.LeaveBatch();
-        SetDevelopmentRecipe(settings);
-    });
+    public void UseDevelopmentRecipe(ClassicalSettings settings) => ChangeWhileIdle(() => SetDevelopmentRecipe(settings, leaveBatch: true));
 
-    public void UsePublishedRecipe(LoadedClassicalRecipe recipe)
+    public void UsePublishedRecipe(LoadedRecipe recipe)
     {
         ArgumentNullException.ThrowIfNull(recipe);
         ChangeWhileIdle(() =>
         {
+            recipe.ThrowIfDisposed();
             store.LeaveBatch();
             SetPublishedRecipe(recipe);
         });
     }
 
-    private void SetPublishedRecipe(LoadedClassicalRecipe recipe)
+    private void SetPublishedRecipe(LoadedRecipe recipe)
     {
+        var previous = publishedRecipe;
         publishedRecipe = recipe;
         developmentDetector = null;
         recipeId = recipe.VersionId.ToString("D");
         recipeJson = recipe.RecipeJson;
+        if (!ReferenceEquals(previous, recipe)) previous?.Dispose();
     }
 
-    public void UseBatch(BatchPackage package, LoadedClassicalRecipe recipe) => ChangeWhileIdle(() =>
+    public void UseBatch(BatchPackage package, LoadedRecipe recipe) => ChangeWhileIdle(() =>
     {
+        recipe.ThrowIfDisposed();
         store.SelectBatch(package, recipe);
         SetPublishedRecipe(recipe);
     });
 
     // Startup reloads the already selected immutable recipe while retaining a PLC result.
     // This does not select a batch or change its persisted session/approval/quantity.
-    public void RestoreCachedBatchRecipe(LoadedClassicalRecipe recipe) => ChangeWhileIdle(() =>
+    public void RestoreCachedBatchRecipe(LoadedRecipe recipe) => ChangeWhileIdle(() =>
     {
+        recipe.ThrowIfDisposed();
         var active = store.ReadActiveBatch() ?? throw new InspectionRejectedException("本地尚未选择批次。");
         if (active.Batch.RecipeVersionId != recipe.VersionId || active.Batch.RecipeBundleHash != recipe.BundleHash)
             throw new InspectionRejectedException("恢复方案与当前缓存批次的固定版本不一致。");
@@ -82,7 +90,7 @@ public sealed class InspectionCoordinator
     {
         if (Interlocked.CompareExchange(ref busy, 1, 0) != 0)
             throw new InspectionRejectedException("请等待已接受检测完成后退出人员会话。");
-        try { store.ClearExecutionSession(); }
+        try { ObjectDisposedException.ThrowIf(disposed, this); store.ClearExecutionSession(); }
         catch
         {
             faulted = true;
@@ -97,6 +105,7 @@ public sealed class InspectionCoordinator
             throw new InvalidOperationException("工位忙，不能变更检测状态。");
         try
         {
+            ObjectDisposedException.ThrowIf(disposed, this);
             if (faulted) throw new InvalidOperationException("本地保存失败，工位已停止接件，不能通过切换方案恢复。");
             change();
         }
@@ -131,6 +140,7 @@ public sealed class InspectionCoordinator
             throw new InvalidOperationException("工位忙，未接受新的检测。");
         try
         {
+            ObjectDisposedException.ThrowIf(disposed, this);
             if (faulted) throw new InvalidOperationException("本地保存失败，工位已停止接件；检查存储后重启工位。");
             return await Task.Run(async () =>
             {
@@ -191,6 +201,20 @@ public sealed class InspectionCoordinator
         {
             faulted = true;
             throw;
+        }
+        finally { Interlocked.Exchange(ref busy, 0); }
+    }
+
+    public void Dispose()
+    {
+        if (Interlocked.CompareExchange(ref busy, 1, 0) != 0)
+            throw new InvalidOperationException("请等待已接受检测完成后释放工位方案。");
+        try
+        {
+            if (disposed) return;
+            disposed = true;
+            publishedRecipe?.Dispose();
+            publishedRecipe = null;
         }
         finally { Interlocked.Exchange(ref busy, 0); }
     }

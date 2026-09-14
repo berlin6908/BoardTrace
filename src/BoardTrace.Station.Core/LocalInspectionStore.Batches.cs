@@ -120,7 +120,7 @@ public sealed partial class LocalInspectionStore
     }
 
     // Call only with the complete recipe already loaded and verified by LocalRecipeStore.
-    public void SelectBatch(BatchPackage package, LoadedClassicalRecipe recipe)
+    public void SelectBatch(BatchPackage package, LoadedRecipe recipe)
     {
         var batch = package.Batch;
         if (recipe.VersionId != batch.RecipeVersionId || recipe.BundleHash != batch.RecipeBundleHash ||

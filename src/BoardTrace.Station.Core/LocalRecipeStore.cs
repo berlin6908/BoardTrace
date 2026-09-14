@@ -93,7 +93,7 @@ public sealed class LocalRecipeStore(string databasePath)
         transaction.Commit();
     }
 
-    public LoadedClassicalRecipe Load(Guid versionId)
+    public LoadedRecipe Load(Guid versionId)
     {
         string document;
         string storedHash;
@@ -123,7 +123,7 @@ public sealed class LocalRecipeStore(string databasePath)
         if (version.Bundle.VersionId != versionId || !string.Equals(storedHash, version.BundleHash, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("本地方案版本身份或哈希已损坏。");
         ValidateContents(version, assets);
-        return new LoadedClassicalRecipe(version, document, assets);
+        return new LoadedRecipe(version, document, assets);
     }
 
     // Listing reads package metadata and asset counts only. Load performs full BLOB verification before use.
@@ -145,10 +145,10 @@ public sealed class LocalRecipeStore(string databasePath)
             var bundle = version.Bundle;
             if (bundle.VersionId.ToString() != reader.GetString(0)
                 || !string.Equals(version.BundleHash, reader.GetString(2), StringComparison.OrdinalIgnoreCase)
-                || bundle.References.Select(reference => reference.AssetId).Distinct().Count() != reader.GetInt64(3))
+                || AssetIds(bundle).Count() != reader.GetInt64(3))
                 throw new InvalidDataException("本地缓存方案身份或资产集合不完整。");
             summaries.Add(new PublishedRecipeSummary(bundle.VersionId, bundle.DraftId, bundle.ValidationRunId,
-                bundle.Name, bundle.Algorithm, version.BundleHash, bundle.PublishedById, bundle.PublishedByName, bundle.PublishedAt));
+                bundle.Name, bundle.Definition.Algorithm, version.BundleHash, bundle.PublishedById, bundle.PublishedByName, bundle.PublishedAt));
         }
         return summaries.OrderByDescending(summary => summary.PublishedAt).ThenBy(summary => summary.Id).ToArray();
     }
@@ -171,7 +171,7 @@ public sealed class LocalRecipeStore(string databasePath)
     {
         ValidateBundle(version);
         var bundle = version.Bundle;
-        if (assets.Count != bundle.References.Select(reference => reference.AssetId).Distinct().Count())
+        if (assets.Count != AssetIds(bundle).Count())
             throw new InvalidDataException("方案资产集合不完整。");
         foreach (var reference in bundle.References)
         {
@@ -179,18 +179,40 @@ public sealed class LocalRecipeStore(string databasePath)
                 || !string.Equals(Convert.ToHexStringLower(SHA256.HashData(bytes)), reference.Sha256, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException($"参考图 {reference.SampleId} 缺失，或长度/SHA-256 与发布版本不一致。");
         }
+        if (bundle.Model is { } model && (!assets.TryGetValue(model.AssetId, out var modelBytes)
+            || modelBytes.Length != model.ByteLength
+            || !string.Equals(Convert.ToHexStringLower(SHA256.HashData(modelBytes)), model.Sha256, StringComparison.OrdinalIgnoreCase)))
+            throw new InvalidDataException("模型缺失，或长度/SHA-256 与发布版本不一致。");
     }
+
+    internal static IEnumerable<Guid> AssetIds(PublishedRecipeBundle bundle) => bundle.References.Select(reference => reference.AssetId)
+        .Concat(bundle.Model is { } model ? [model.AssetId] : Array.Empty<Guid>()).Distinct();
 
     internal static void ValidateBundle(PublishedRecipeVersion version)
     {
         var bundle = version.Bundle;
         if (bundle is null || bundle.References is null || bundle.References.Count == 0
-            || bundle.Algorithm != "Classical" || bundle.Settings is null
             || bundle.Input is not { Width: 640, Height: 640, RequiresReference: true })
-            throw new InvalidDataException("当前工位只支持包含参考图的 640×640 Classical 方案。");
+            throw new InvalidDataException("当前工位需要包含参考图的 640×640 方案。");
         if (bundle.References.Any(reference => reference is null || string.IsNullOrWhiteSpace(reference.SampleId))
             || bundle.References.Select(reference => reference.SampleId).Distinct(StringComparer.Ordinal).Count() != bundle.References.Count)
             throw new InvalidDataException("方案参考图样本标识缺失或重复。");
+        switch (bundle.Definition)
+        {
+            case ClassicalRecipeDefinition { Settings: not null } when bundle.Model is null:
+                break;
+            case PairedOnnxRecipeDefinition { Thresholds: not null } paired when bundle.Model is { ByteLength: > 0 } model
+                && model.InputContract == RecipeModelInput.PairedGrayAbsDiff640V1
+                && string.Equals(paired.ModelSha256, model.Sha256, StringComparison.OrdinalIgnoreCase)
+                && !bundle.References.Any(reference => reference.AssetId == model.AssetId):
+                var scores = paired.Thresholds;
+                if (new[] { scores.Open, scores.Short, scores.Mousebite, scores.Spur, scores.Copper, scores.PinHole }
+                    .Any(score => !double.IsFinite(score) || score is < 0 or > 1))
+                    throw new InvalidDataException("模型的六类阈值必须在 0 到 1 之间。");
+                break;
+            default:
+                throw new InvalidDataException("方案类型与模型资产或输入契约不一致。");
+        }
         if (!string.Equals(PublishedRecipeTransfer.Hash(bundle), version.BundleHash, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("方案包哈希与发布版本不一致。");
     }

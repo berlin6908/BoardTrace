@@ -56,6 +56,11 @@ public static class RecipePublicationEndpoints
                 throw new PublicationRejected(409, "验证必须完成固定 200 张全部样本后才能发布。");
             var report = JsonSerializer.Deserialize<RecipeValidationReport>(run.ReportJson)!;
             var targets = JsonSerializer.Deserialize<RecipeTargets>(run.TargetsJson)!;
+            var definition = JsonSerializer.Deserialize<RecipeDefinition>(run.DefinitionJson)!;
+            var paired = definition as PairedOnnxRecipeDefinition;
+            if (report.MatchingMode != (paired is null ? "Localization" : "ClassAware") ||
+                report.ModelSha256 != paired?.ModelSha256)
+                throw new PublicationRejected(409, "验证算法、匹配口径或模型身份与方案不符。");
             if (report.Rows.Count != 200)
                 throw new PublicationRejected(409, "验证报告必须完整包含 200 张样本。");
             if (report.ExecutionFailures != 0 || report.Rows.Any(row => row.Status != "Completed" || row.Error is not null))
@@ -83,7 +88,7 @@ public static class RecipePublicationEndpoints
                 throw new PublicationRejected(409, "验证样本与固定 200 张清单不一致。");
 
             var versionId = Guid.NewGuid();
-            var assets = new Dictionary<string, RecipeReferenceAsset>(StringComparer.Ordinal);
+            var assets = new Dictionary<string, RecipeAsset>(StringComparer.Ordinal);
             var files = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
             var references = new List<PublishedRecipeReference>(200);
             var fullRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(dataRoot)) + Path.DirectorySeparatorChar;
@@ -102,16 +107,27 @@ public static class RecipePublicationEndpoints
                     throw new PublicationRejected(409, $"参考资产内容已改变（样本 {input.SampleId}），请重新验证。");
                 if (!assets.TryGetValue(hash, out var asset))
                 {
-                    asset = new RecipeReferenceAsset { Id = Guid.NewGuid(), RecipeVersionId = versionId, Sha256 = hash, Content = bytes };
+                    asset = new RecipeAsset { Id = Guid.NewGuid(), RecipeVersionId = versionId, Sha256 = hash, Content = bytes };
                     assets.Add(hash, asset);
                 }
                 references.Add(new(input.SampleId, asset.Id, hash, bytes.Length));
             }
+            PublishedRecipeModel? publishedModel = null;
+            if (paired is not null)
+            {
+                var model = await db.RecipeModels.AsNoTracking().SingleOrDefaultAsync(x => x.Sha256 == paired.ModelSha256, token);
+                if (model is null || model.InputContract != RecipeModelInput.PairedGrayAbsDiff640V1 ||
+                    model.ByteLength != model.Content.Length || Hash(model.Content) != paired.ModelSha256)
+                    throw new PublicationRejected(409, "模型资产不可用或已改变，请重新上传并验证。");
+                var asset = new RecipeAsset { Id = Guid.NewGuid(), RecipeVersionId = versionId, Sha256 = model.Sha256, Content = model.Content };
+                assets.Add(model.Sha256, asset);
+                publishedModel = new(asset.Id, model.Sha256, model.ByteLength, model.InputContract);
+            }
             var publishedAt = DateTimeOffset.UtcNow;
-            var bundle = new PublishedRecipeBundle(versionId, id, run.Id, run.Name, "Classical",
-                JsonSerializer.Deserialize<RecipeClassicalSettings>(run.SettingsJson)!, targets, policy.Targets!,
+            var bundle = new PublishedRecipeBundle(versionId, id, run.Id, run.Name,
+                definition, targets, policy.Targets!,
                 new PublishedRecipeInput(640, 640, true), algorithmHash, run.ManifestHash, run.SnapshotHash,
-                references, author.Id, author.DisplayName, publishedAt);
+                references, publishedModel, author.Id, author.DisplayName, publishedAt);
             var publication = new RecipePublication
             {
                 Id = versionId, DraftId = id, ValidationRunId = run.Id, Name = run.Name,
@@ -156,9 +172,9 @@ public static class RecipePublicationEndpoints
     }
 
     private static async Task<IResult> List(BoardTraceDbContext db, CancellationToken token) => Results.Ok(
-        await db.RecipeVersions.AsNoTracking().OrderByDescending(version => version.PublishedAt)
+        (await db.RecipeVersions.AsNoTracking().OrderByDescending(version => version.PublishedAt).ToArrayAsync(token))
             .Select(version => new PublishedRecipeSummary(version.Id, version.DraftId, version.ValidationRunId,
-                version.Name, "Classical", version.BundleHash, version.PublishedById, version.PublishedByName, version.PublishedAt)).ToArrayAsync(token));
+                version.Name, version.View().Bundle.Definition.Algorithm, version.BundleHash, version.PublishedById, version.PublishedByName, version.PublishedAt)));
 
     private static async Task<IResult> Detail(Guid id, ClaimsPrincipal principal, UserManager<BoardTraceUser> users, BoardTraceDbContext db, CancellationToken token)
     {
@@ -169,7 +185,7 @@ public static class RecipePublicationEndpoints
 
     private static async Task<IResult> Reference(Guid id, BoardTraceDbContext db, UserManager<BoardTraceUser> users, HttpContext context, CancellationToken token)
     {
-        var asset = await db.RecipeReferenceAssets.AsNoTracking().SingleOrDefaultAsync(asset => asset.Id == id, token);
+        var asset = await db.RecipeAssets.AsNoTracking().SingleOrDefaultAsync(asset => asset.Id == id, token);
         if (asset is null) return Results.NotFound();
         if (!await MayDownload(asset.RecipeVersionId, context.User, users, db, token)) return Results.Forbid();
         context.Response.Headers.CacheControl = "private,no-store";

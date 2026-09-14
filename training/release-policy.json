@@ -1,0 +1,8 @@
+{
+  "qualityTargetsFrozen": true,
+  "qualityTargets": {
+    "minPrecision": 0.9,
+    "minRecall": 0.95,
+    "maxP95Ms": 1500
+  }
+}

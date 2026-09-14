@@ -26,7 +26,7 @@ switch (args[0])
         break;
     case "onnx":
         if (args.Length != 5) throw new ArgumentException("onnx <model> <sha256> <tested> <reference>");
-        using (var detector = new OnnxDetector(args[1], args[2]))
+    using (var detector = new OnnxDetector(File.ReadAllBytes(args[1]), args[2]))
         {
             var tested = File.ReadAllBytes(args[3]);
             var reference = File.ReadAllBytes(args[4]);

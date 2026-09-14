@@ -126,9 +126,9 @@ public sealed class StationBatchClientTests
             Cv2.Circle(image, new Point(200, 450), 60, Scalar.Black, -1);
             var bytes = image.ImEncode(".png");
             var targets = new RecipeTargets(1, 1, 500);
-            var bundle = new PublishedRecipeBundle(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "Isolated client fixture", "Classical", new(), targets, targets, new(640, 640, true),
+            var bundle = new PublishedRecipeBundle(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "Isolated client fixture", new ClassicalRecipeDefinition(new()), targets, targets, new(640, 640, true),
                 Hash(File.ReadAllBytes(typeof(ClassicalDetector).Assembly.Location)), new string('a', 64), new string('b', 64),
-                [new("sample", Guid.NewGuid(), Hash(bytes), bytes.Length)], "engineer", "Fixture Engineer", DateTimeOffset.UtcNow);
+                [new("sample", Guid.NewGuid(), Hash(bytes), bytes.Length)], null, "engineer", "Fixture Engineer", DateTimeOffset.UtcNow);
             var version = new PublishedRecipeVersion(bundle, PublishedRecipeTransfer.Hash(bundle));
             var batch = new BatchDefinition(Guid.NewGuid(), "ISOLATED-CLIENT", "PCB", "TOP", 2, "STATION-A", bundle.VersionId, version.BundleHash, "engineer", "Fixture Engineer", DateTimeOffset.UtcNow);
             return new(inspections, store, new(batch, BatchStatus.AwaitingFirstArticle, null, version), bytes);

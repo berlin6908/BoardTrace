@@ -11,5 +11,6 @@
     <ProjectReference Include="../../src/BoardTrace.Server/BoardTrace.Server.csproj" />
     <ProjectReference Include="../../src/BoardTrace.Station.Core/BoardTrace.Station.Core.csproj" />
     <Using Include="Xunit" />
+    <None Include="../BoardTrace.Vision.Tests/Fixtures/pixel-detector.onnx" Link="pixel-detector.onnx" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

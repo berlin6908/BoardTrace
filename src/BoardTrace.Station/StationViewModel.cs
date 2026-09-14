@@ -479,6 +479,7 @@ public sealed partial class StationViewModel : ObservableObject, IAsyncDisposabl
         }
         finally
         {
+            coordinator.Dispose();
             uploadClient.Dispose();
             batchDeviceClient.Dispose();
             personnelSession?.Dispose();

@@ -27,10 +27,10 @@ internal sealed record ProbeFixture(ReplaySample Sample, byte[] Reference, byte[
         var recipes = new LocalRecipeStore(store.DatabasePath); recipes.Initialize();
         var versionId = Guid.NewGuid(); var assetId = Guid.NewGuid(); var now = DateTimeOffset.UtcNow;
         var targets = new RecipeTargets(1, 1, 500);
-        var bundle = new PublishedRecipeBundle(versionId, Guid.NewGuid(), Guid.NewGuid(), "隔离PLC集成夹具·非质量发布", "Classical",
-            new RecipeClassicalSettings(BoxPadding: 4), targets, targets, new(640, 640, true),
+        var bundle = new PublishedRecipeBundle(versionId, Guid.NewGuid(), Guid.NewGuid(), "隔离PLC集成夹具·非质量发布",
+            new ClassicalRecipeDefinition(new RecipeClassicalSettings(BoxPadding: 4)), targets, targets, new(640, 640, true),
             Hash(await File.ReadAllBytesAsync(typeof(ClassicalDetector).Assembly.Location)), Hash(await File.ReadAllBytesAsync(inputFile)),
-            new string('a', 64), [new(sample.SampleId, assetId, Hash(reference), reference.Length)], "fixture-engineer", "Isolated Fixture Engineer", now);
+            new string('a', 64), [new(sample.SampleId, assetId, Hash(reference), reference.Length)], null, "fixture-engineer", "Isolated Fixture Engineer", now);
         var version = new PublishedRecipeVersion(bundle, PublishedRecipeTransfer.Hash(bundle));
         recipes.Save(version, new Dictionary<Guid, byte[]> { [assetId] = reference });
         var loaded = recipes.Load(versionId);

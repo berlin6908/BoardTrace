@@ -100,7 +100,8 @@ public sealed partial class StationViewModel
         var cached = await Task.Run(store.ReadActiveBatch);
         if (cached is null) return;
         var recipe = await Task.Run(() => recipeStore.Load(cached.Batch.RecipeVersionId));
-        coordinator.RestoreCachedBatchRecipe(recipe);
+        try { coordinator.RestoreCachedBatchRecipe(recipe); }
+        catch { recipe.Dispose(); throw; }
         loadedRecipe = recipe;
         var allowed = recipe.SampleIds.ToHashSet(StringComparer.Ordinal);
         SelectRecipeSamples(replaySamples.Where(sample => allowed.Contains(sample.SampleId)).ToArray());
@@ -154,28 +155,41 @@ public sealed partial class StationViewModel
 
     private async Task DownloadAndApplyBatchAsync(Guid batchId)
     {
-        BatchNotice = "正在下载批次、核对方案与参考图…";
+        BatchNotice = "正在读取批次并核对完整固定方案…";
         try
         {
-            var downloaded = await batchClient!.DownloadAsync(batchId, recipeStore, uploadCancellation.Token);
-            await ApplyBatchAsync(downloaded.Package, downloaded.Recipe);
+            var package = await batchClient!.GetPackageAsync(batchId, uploadCancellation.Token);
+            if (loadedRecipe is { } current && current.VersionId == package.Batch.RecipeVersionId
+                && current.BundleHash == package.Batch.RecipeBundleHash)
+                await ApplyBatchAsync(package, current);
+            else
+            {
+                var recipe = await new PublishedRecipeDownloader(recipeStore, batchDeviceClient)
+                    .DownloadAsync(package.Batch.RecipeVersionId, uploadCancellation.Token);
+                await ApplyBatchAsync(package, recipe);
+            }
             await UpdateRecipeChoicesAsync();
         }
         catch (Exception error) { BatchOperationFailed("批次下载或批准刷新失败", error, personnel: false); }
     }
 
-    private async Task ApplyBatchAsync(BatchPackage package, LoadedClassicalRecipe recipe)
+    private async Task ApplyBatchAsync(BatchPackage package, LoadedRecipe recipe)
     {
-        if (package.Batch.StationId != StationId) throw new InvalidDataException("该批次不属于当前工位。");
-        var allowed = recipe.SampleIds.ToHashSet(StringComparer.Ordinal);
-        var samples = replaySamples.Where(sample => allowed.Contains(sample.SampleId)).ToArray();
-        if (samples.Length == 0) throw new InvalidDataException("批次方案与工位回放清单没有共同样本。");
-        coordinator.UseBatch(package, recipe);
+        ReplaySample[] samples;
+        try
+        {
+            if (package.Batch.StationId != StationId) throw new InvalidDataException("该批次不属于当前工位。");
+            var allowed = recipe.SampleIds.ToHashSet(StringComparer.Ordinal);
+            samples = replaySamples.Where(sample => allowed.Contains(sample.SampleId)).ToArray();
+            if (samples.Length == 0) throw new InvalidDataException("批次方案与工位回放清单没有共同样本。");
+            coordinator.UseBatch(package, recipe);
+        }
+        catch { if (!ReferenceEquals(recipe, loadedRecipe)) recipe.Dispose(); throw; }
         loadedRecipe = recipe;
         SelectRecipeSamples(samples);
         await RefreshBatchStateAsync();
         BatchNotice = BatchStateText;
-        RecipeNotice = "批次绑定完整缓存方案，版本与参考资产已固定。";
+        RecipeNotice = "批次绑定完整缓存方案，算法、版本与资产已固定。";
         if (activeBatch?.Status == BatchStatus.Closed)
         {
             BatchNotice = "中央已关闭此批次，人员授权已结束。刷新工位批次后可下载下一批，旧档案继续保留。";

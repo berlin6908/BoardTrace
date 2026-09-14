@@ -58,6 +58,7 @@ app.UseAuthorization();
 app.MapAuth();
 app.MapInspections();
 app.MapRecipes();
+app.MapRecipeModels();
 app.MapRecipePublications();
 app.MapBatches();
 app.MapQuality();

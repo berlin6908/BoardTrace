@@ -26,14 +26,24 @@ public static class RecipeEndpoints
     private static string? Check(SaveRecipeDraft input)
     {
         if (string.IsNullOrWhiteSpace(input.Name) || input.Name.Length > 200) return "方案名称不能为空且不能超过 200 字。";
-        var s = input.Settings;
         var t = input.Targets;
-        if (s is null || t is null) return "设置和验收目标必填。";
-        if (s.BinarizationThreshold is < 0 or > 255 || s.EdgeTolerance is < 0 or > 10 ||
-            s.MinimumArea < 1 || s.ClosingSize < 1 || s.ClosingSize > 31 || s.ClosingSize % 2 == 0 ||
-            s.BoxPadding is < 0 or > 100 || !double.IsFinite(s.MaximumTranslation) || s.MaximumTranslation < 0 ||
-            !double.IsFinite(s.MinimumAlignmentResponse) || s.MinimumAlignmentResponse is < 0 or > 1)
-            return "经典检测参数超出有效范围。";
+        if (input.Definition is null || t is null) return "检测方案和验收目标必填。";
+        if (input.Definition is ClassicalRecipeDefinition classical)
+        {
+            var s = classical.Settings;
+            if (s is null || s.BinarizationThreshold is < 0 or > 255 || s.EdgeTolerance is < 0 or > 10 ||
+                s.MinimumArea < 1 || s.ClosingSize < 1 || s.ClosingSize > 31 || s.ClosingSize % 2 == 0 ||
+                s.BoxPadding is < 0 or > 100 || !double.IsFinite(s.MaximumTranslation) || s.MaximumTranslation < 0 ||
+                !double.IsFinite(s.MinimumAlignmentResponse) || s.MinimumAlignmentResponse is < 0 or > 1)
+                return "经典检测参数超出有效范围。";
+        }
+        else if (input.Definition is PairedOnnxRecipeDefinition paired)
+        {
+            if (!RecipeModelEndpoints.IsSha256(paired.ModelSha256)) return "模型 SHA-256 无效。";
+            if (paired.Thresholds is not { } s || new[] { s.Open, s.Short, s.Mousebite, s.Spur, s.Copper, s.PinHole }
+                .Any(value => !double.IsFinite(value) || value is < 0 or > 1)) return "六类置信度阈值必须完整且在 0–1 范围。";
+        }
+        else return "检测算法不支持。";
         if (!double.IsFinite(t.MinPrecision) || t.MinPrecision is < 0 or > 1 ||
             !double.IsFinite(t.MinRecall) || t.MinRecall is < 0 or > 1 ||
             !double.IsFinite(t.MaxP95Ms) || t.MaxP95Ms <= 0)
@@ -54,11 +64,18 @@ public static class RecipeEndpoints
     {
         if (!Engineer(user)) return Results.Forbid();
         if (Check(input) is string error) return Results.Problem(statusCode: 400, title: error);
+        if (input.Definition is PairedOnnxRecipeDefinition paired)
+        {
+            paired = paired with { ModelSha256 = paired.ModelSha256.ToLowerInvariant() };
+            if (!await db.RecipeModels.AnyAsync(x => x.Sha256 == paired.ModelSha256, token))
+                return Results.Problem(statusCode: 409, title: "模型尚未上传。");
+            input = input with { Definition = paired };
+        }
         var manifestHash = await ManifestHash(config, token);
         if (manifestHash is null) return Results.Problem(statusCode: 503, title: "固定验证清单未配置。");
-        var settings = JsonSerializer.Serialize(input.Settings);
+        var settings = JsonSerializer.Serialize<RecipeDefinition>(input.Definition);
         var targets = JsonSerializer.Serialize(input.Targets);
-        var draft = new RecipeDraft { Id = Guid.NewGuid(), Name = input.Name.Trim(), SettingsJson = settings,
+        var draft = new RecipeDraft { Id = Guid.NewGuid(), Name = input.Name.Trim(), DefinitionJson = settings,
             TargetsJson = targets, DataManifestSha256 = manifestHash,
             SnapshotHash = RecipeDraft.Hash(input.Name.Trim(), settings, targets, manifestHash),
             AuthorId = user.FindFirstValue(ClaimTypes.NameIdentifier)!, UpdatedAt = DateTimeOffset.UtcNow };
@@ -72,15 +89,22 @@ public static class RecipeEndpoints
     {
         if (!Engineer(user)) return Results.Forbid();
         if (Check(input) is string error) return Results.Problem(statusCode: 400, title: error);
+        if (input.Definition is PairedOnnxRecipeDefinition paired)
+        {
+            paired = paired with { ModelSha256 = paired.ModelSha256.ToLowerInvariant() };
+            if (!await db.RecipeModels.AnyAsync(x => x.Sha256 == paired.ModelSha256, token))
+                return Results.Problem(statusCode: 409, title: "模型尚未上传。");
+            input = input with { Definition = paired };
+        }
         var manifestHash = await ManifestHash(config, token);
         if (manifestHash is null) return Results.Problem(statusCode: 503, title: "固定验证清单未配置。");
         var draft = await db.RecipeDrafts.FindAsync([id], token);
         if (draft is null) return Results.NotFound();
         draft.Name = input.Name.Trim();
-        draft.SettingsJson = JsonSerializer.Serialize(input.Settings);
+        draft.DefinitionJson = JsonSerializer.Serialize<RecipeDefinition>(input.Definition);
         draft.TargetsJson = JsonSerializer.Serialize(input.Targets);
         draft.DataManifestSha256 = manifestHash;
-        draft.SnapshotHash = RecipeDraft.Hash(draft.Name, draft.SettingsJson, draft.TargetsJson, manifestHash);
+        draft.SnapshotHash = RecipeDraft.Hash(draft.Name, draft.DefinitionJson, draft.TargetsJson, manifestHash);
         draft.UpdatedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(token);
         return Results.Ok(draft.View());
@@ -116,7 +140,7 @@ public static class RecipeEndpoints
             return Results.Problem(statusCode: 409, title: "固定验证清单已改变",
                 detail: "请重新保存草稿后再验证。");
         var run = new ValidationRun { Id = Guid.NewGuid(), DraftId = id, Status = "Queued", Name = draft.Name, Processed = 0,
-            Total = total, SnapshotHash = draft.SnapshotHash, SettingsJson = draft.SettingsJson,
+            Total = total, SnapshotHash = draft.SnapshotHash, DefinitionJson = draft.DefinitionJson,
             TargetsJson = draft.TargetsJson,
             ManifestHash = Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(inputPath, token))),
             TruthHash = Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(truthPath, token))),

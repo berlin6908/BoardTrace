@@ -4,8 +4,8 @@ import { ElAlert, ElButton, ElDialog, ElDrawer, ElEmpty, ElOption, ElProgress, E
 import { ApiError, requestError } from './api'
 import type { CurrentUser } from './api'
 import { formatMs, formatTime } from './inspections'
-import { formatPercent, getPublishedRecipe, getReleasePolicy, getValidation, isActiveRun, listDrafts, listPublishedRecipes, listValidations, publishRecipe, saveDraft, settingLabels, startValidation, validationLabels } from './recipes'
-import type { PublishedRecipeSummary, PublishedRecipeVersion, RecipeDraft, ReleasePolicy, SaveRecipeDraft, ValidationRun } from './recipes'
+import { algorithmLabels, formatPercent, getPublishedRecipe, getReleasePolicy, getValidation, isActiveRun, listDrafts, listPublishedRecipes, listRecipeModels, listValidations, pairedInputContract, publishRecipe, saveDraft, settingLabels, startValidation, thresholdLabels, uploadRecipeModel, validationLabels } from './recipes'
+import type { PublishedRecipeSummary, PublishedRecipeVersion, RecipeDraft, RecipeModelSummary, ReleasePolicy, SaveRecipeDraft, ValidationRun } from './recipes'
 import DraftEditor from './components/DraftEditor.vue'
 import RecipeReport from './components/RecipeReport.vue'
 import './recipes.css'
@@ -35,6 +35,14 @@ const publishError = ref('')
 const releasePolicy = ref<ReleasePolicy | null>(null)
 const policyLoading = ref(true)
 const policyError = ref('')
+const models = ref<RecipeModelSummary[]>([])
+const modelsLoading = ref(false)
+const modelsError = ref('')
+const modelFile = ref<File | null>(null)
+const expectedModelSha = ref('')
+const uploadingModel = ref(false)
+const uploadError = ref('')
+const uploadNotice = ref('')
 const versionsOpen = ref(false)
 const versions = ref<PublishedRecipeSummary[]>([])
 const versionsLoading = ref(false)
@@ -50,8 +58,9 @@ let runRequest: AbortController | undefined
 let versionsRequest: AbortController | undefined
 let versionRequest: AbortController | undefined
 let policyRequest: AbortController | undefined
+let modelsRequest: AbortController | undefined
 let pollTimer: ReturnType<typeof setTimeout> | undefined
-const busy = computed(() => saving.value || starting.value || publishing.value)
+const busy = computed(() => saving.value || starting.value || publishing.value || uploadingModel.value)
 const currentRunActive = computed(() => runs.value.some(run => isActiveRun(run) && run.snapshot.snapshotHash === selectedDraft.value?.snapshotHash))
 const selectedPublication = computed(() => versions.value.find(version => version.validationRunId === selectedRun.value?.id))
 const meetsReleasePolicy = computed(() => {
@@ -241,6 +250,49 @@ async function loadReleasePolicy() {
   } finally { if (!request.signal.aborted) policyLoading.value = false }
 }
 
+async function loadModels() {
+  modelsRequest?.abort()
+  const request = new AbortController()
+  modelsRequest = request
+  modelsLoading.value = true
+  modelsError.value = ''
+  try { const response = await listRecipeModels(request.signal); if (!request.signal.aborted) models.value = response }
+  catch (cause) { if (!request.signal.aborted) showError(cause, modelsError) }
+  finally { if (!request.signal.aborted) modelsLoading.value = false }
+}
+
+function chooseModelFile(event: Event) {
+  modelFile.value = (event.target as HTMLInputElement).files?.[0] ?? null
+  uploadError.value = ''
+  uploadNotice.value = ''
+}
+
+async function uploadModel() {
+  const file = modelFile.value
+  const sha = expectedModelSha.value.trim().toLowerCase()
+  if (!canEdit.value || uploadingModel.value || !file) return
+  if (!/^[0-9a-f]{64}$/.test(sha) || file.size < 1 || file.size > 200 * 1024 * 1024) {
+    uploadError.value = '请选不超过 200 MiB 的 ONNX 文件并填写导出清单的完整 64 位 SHA256。'
+    return
+  }
+  uploadingModel.value = true
+  uploadError.value = ''
+  uploadNotice.value = ''
+  try {
+    const result = await uploadRecipeModel(file, sha, lifetime.signal)
+    if (lifetime.signal.aborted) return
+    uploadNotice.value = `模型已入库：${result.sha256} · ${(result.byteLength / 1024 / 1024).toFixed(1)} MiB。`
+    modelFile.value = null
+    expectedModelSha.value = ''
+    await loadModels()
+  } catch (cause) {
+    if (!lifetime.signal.aborted) {
+      showError(cause, uploadError)
+      if (!(cause instanceof ApiError)) uploadError.value += ' 请求回执不确定，请先刷新模型列表核对 SHA256。'
+    }
+  } finally { uploadingModel.value = false }
+}
+
 function openVersions(id = '') {
   versionsOpen.value = true
   void loadVersions(id)
@@ -277,13 +329,13 @@ async function publishSelected() {
   } finally { publishing.value = false }
 }
 
-onMounted(() => { void loadDrafts(); void loadVersions(); void loadReleasePolicy() })
-onBeforeUnmount(() => { lifetime.abort(); listRequest?.abort(); historyRequest?.abort(); versionsRequest?.abort(); versionRequest?.abort(); policyRequest?.abort(); stopTracking() })
+onMounted(() => { void loadDrafts(); void loadVersions(); void loadReleasePolicy(); void loadModels() })
+onBeforeUnmount(() => { lifetime.abort(); listRequest?.abort(); historyRequest?.abort(); versionsRequest?.abort(); versionRequest?.abort(); policyRequest?.abort(); modelsRequest?.abort(); stopTracking() })
 </script>
 
 <template>
   <main class="workspace recipes-workspace">
-    <div class="page-heading"><div><p class="eyebrow">工艺开发 · 固定验证集</p><h1>方案验证</h1><p class="subtitle">保存经典检测草稿，在 200 张验证图像上检查定位效果与耗时。</p></div><div class="validation-history"><ElButton @click="openVersions()">已发布版本</ElButton><ElButton v-if="canEdit" type="primary" :disabled="busy || loading" @click="editDraft(null)">新建草稿</ElButton></div></div>
+    <div class="page-heading"><div><p class="eyebrow">工艺开发 · 固定验证集</p><h1>方案验证</h1><p class="subtitle">经典定位与成对 ONNX 六类检测分别保存定义，在固定 200 张 validation 图像上真实验证。</p></div><div class="validation-history"><ElButton @click="openVersions()">已发布版本</ElButton><ElButton v-if="canEdit" type="primary" :disabled="busy || loading" @click="editDraft(null)">新建草稿</ElButton></div></div>
     <section class="release-policy-panel records-panel" aria-label="正式发布政策">
       <div class="section-heading"><h2>正式发布门槛</h2><ElButton link :loading="policyLoading" @click="loadReleasePolicy">重新读取</ElButton></div>
       <p v-if="policyLoading" class="section-note">正在读取服务器冻结政策…</p>
@@ -294,20 +346,28 @@ onBeforeUnmount(() => { lifetime.abort(); listRequest?.abort(); historyRequest?.
         <dl class="draft-targets"><div><dt>正式最低精确率</dt><dd>{{ formatPercent(releasePolicy.targets.minPrecision) }}</dd></div><div><dt>正式最低召回率</dt><dd>{{ formatPercent(releasePolicy.targets.minRecall) }}</dd></div><div><dt>正式最高 p95</dt><dd>{{ formatMs(releasePolicy.targets.maxP95Ms) }}</dd></div></dl>
       </template>
     </section>
+    <section class="records-panel recipe-models" aria-label="已入库ONNX模型"><div class="section-heading"><h2>成对 ONNX 模型资产</h2><ElButton :loading="modelsLoading" @click="loadModels">刷新列表</ElButton></div>
+      <p class="section-note">固定输入合同 {{ pairedInputContract }}：tested 灰度、reference 灰度及绝对差，640×640。入库只确认资产身份与合同，不代表模型质量已批准。</p>
+      <ElAlert v-if="modelsError" :title="modelsError" type="error" :closable="false" show-icon />
+      <ElSkeleton v-if="modelsLoading && !models.length" :rows="2" animated />
+      <ElEmpty v-else-if="!models.length && !modelsError" description="尚无已入库 ONNX 模型" :image-size="50" />
+      <div v-for="model in models" :key="model.sha256" class="recipe-model-row"><code>{{ model.sha256 }}</code><span>{{ (model.byteLength / 1024 / 1024).toFixed(1) }} MiB · {{ model.inputContract }} · {{ formatTime(model.createdAt) }}</span></div>
+      <form v-if="canEdit" class="model-upload" @submit.prevent="uploadModel"><h3>上传正式导出的 ONNX 二进制</h3><p class="section-note">从导出清单复制预期 SHA256；中央会逐字节核对文件和固定输入合同，上传上限 200 MiB。</p><input type="file" accept=".onnx,application/octet-stream" :disabled="uploadingModel" @change="chooseModelFile" aria-label="选择ONNX模型文件" /><label for="expected-model-sha">导出清单 SHA256</label><ElInput id="expected-model-sha" v-model="expectedModelSha" maxlength="64" :disabled="uploadingModel" placeholder="64 位十六进制 SHA256" /><ElAlert v-if="uploadError" :title="uploadError" type="error" :closable="false" show-icon /><ElAlert v-if="uploadNotice" :title="uploadNotice" type="success" :closable="false" show-icon /><ElButton type="primary" native-type="submit" :loading="uploadingModel" :disabled="!modelFile || uploadingModel">入库模型</ElButton></form>
+    </section>
     <p v-if="!canEdit" class="recipe-access-note">当前角色可查看方案与验证报告；草稿维护和启动验证由工艺工程师执行。</p>
     <div v-if="loading" class="records-panel list-loading" aria-busy="true"><ElSkeleton :rows="6" animated /></div>
     <div v-else-if="listError" class="records-panel state-panel"><ElAlert :title="listError" type="error" :closable="false" show-icon /><ElButton @click="loadDrafts">重新连接</ElButton></div>
     <div v-else-if="!drafts.length" class="records-panel"><ElEmpty description="尚无方案草稿"><ElButton v-if="canEdit" type="primary" @click="editDraft(null)">创建第一个草稿</ElButton><p v-else class="empty-help">工艺工程师创建草稿后，可在此查看参数与真实验证结果。</p></ElEmpty></div>
     <div v-else class="recipe-layout">
       <aside class="records-panel recipe-list" aria-label="方案草稿列表"><div class="results-heading"><h2>草稿 <span class="record-count">{{ drafts.length }}</span></h2><ElButton link :disabled="busy" @click="loadDrafts">刷新</ElButton></div>
-        <button v-for="draft in drafts" :key="draft.id" type="button" class="recipe-choice" :class="{ selected: selectedId === draft.id }" :aria-pressed="selectedId === draft.id" :disabled="busy" @click="selectDraft(draft.id)"><strong>{{ draft.name }}</strong><span>Classical · 经典定位</span><small>{{ formatTime(draft.updatedAt) }}</small></button>
+        <button v-for="draft in drafts" :key="draft.id" type="button" class="recipe-choice" :class="{ selected: selectedId === draft.id }" :aria-pressed="selectedId === draft.id" :disabled="busy" @click="selectDraft(draft.id)"><strong>{{ draft.name }}</strong><span>{{ algorithmLabels[draft.definition.algorithm] }}</span><small>{{ formatTime(draft.updatedAt) }}</small></button>
       </aside>
       <div v-if="selectedDraft" class="recipe-content">
         <section class="records-panel recipe-draft">
-          <div class="section-heading"><div><h2>{{ selectedDraft.name }}</h2><p class="section-note">草稿 · 经典定位 · {{ formatTime(selectedDraft.updatedAt) }} 保存</p></div><ElButton v-if="canEdit" :disabled="busy" @click="editDraft(selectedDraft)">编辑草稿</ElButton></div>
+          <div class="section-heading"><div><h2>{{ selectedDraft.name }}</h2><p class="section-note">草稿 · {{ algorithmLabels[selectedDraft.definition.algorithm] }} · {{ formatTime(selectedDraft.updatedAt) }} 保存</p></div><ElButton v-if="canEdit" :disabled="busy" @click="editDraft(selectedDraft)">编辑草稿</ElButton></div>
           <dl class="draft-targets"><div><dt>最低精确率</dt><dd>{{ formatPercent(selectedDraft.targets.minPrecision) }}</dd></div><div><dt>最低召回率</dt><dd>{{ formatPercent(selectedDraft.targets.minRecall) }}</dd></div><div><dt>最高 p95</dt><dd>{{ formatMs(selectedDraft.targets.maxP95Ms) }}</dd></div></dl>
           <p class="section-note">以上是当前草稿的验收目标，保存时绑定固定验证输入清单；每次验证保留当时的参数和目标。</p>
-          <details class="recipe-snapshot"><summary>查看当前参数与输入清单</summary><dl class="recipe-settings"><div v-for="(value, key) in selectedDraft.settings" :key="key"><dt>{{ settingLabels[key] }}</dt><dd>{{ value }}</dd></div></dl><dl class="snapshot-identifiers"><div><dt>草稿快照</dt><dd>{{ selectedDraft.snapshotHash }}</dd></div><div><dt>固定输入清单 SHA256</dt><dd>{{ selectedDraft.dataManifestSha256 }}</dd></div></dl></details>
+          <details class="recipe-snapshot"><summary>查看当前参数与输入清单</summary><dl v-if="selectedDraft.definition.algorithm === 'Classical'" class="recipe-settings"><div v-for="(value, key) in selectedDraft.definition.settings" :key="key"><dt>{{ settingLabels[key] }}</dt><dd>{{ value }}</dd></div></dl><template v-else><p class="section-note">模型 SHA256：{{ selectedDraft.definition.modelSha256 }}</p><dl class="recipe-settings"><div v-for="(value, key) in selectedDraft.definition.thresholds" :key="key"><dt>{{ thresholdLabels[key] }}</dt><dd>{{ value }}</dd></div></dl></template><dl class="snapshot-identifiers"><div><dt>草稿快照</dt><dd>{{ selectedDraft.snapshotHash }}</dd></div><div><dt>固定输入清单 SHA256</dt><dd>{{ selectedDraft.dataManifestSha256 }}</dd></div></dl></details>
           <div v-if="canEdit" class="validation-actions"><ElButton type="primary" :loading="starting" :disabled="saving || editorOpen || currentRunActive || historyLoading || Boolean(historyError)" @click="validateDraft">{{ currentRunActive ? '当前草稿正在验证' : '启动验证 · 200 张' }}</ElButton><span class="section-note">使用已保存草稿，后台执行真实图像检测。</span></div>
         </section>
         <section class="records-panel validation-panel">
@@ -336,7 +396,7 @@ onBeforeUnmount(() => { lifetime.abort(); listRequest?.abort(); historyRequest?.
       </div>
     </div>
     <p class="page-footnote">当前页面用于开发方案验证，目标针对各草稿保存。验证输入属于 validation 集合。</p>
-    <ElDialog v-model="editorOpen" :title="editingDraft ? '编辑方案草稿' : '新建方案草稿'" width="min(760px, 94vw)" :close-on-click-modal="!saving" :close-on-press-escape="!saving" :show-close="!saving" destroy-on-close class="recipe-editor-dialog"><DraftEditor :key="editorKey" :draft="editingDraft" :saving="saving" :error="saveError" @save="save" @cancel="editorOpen = false" /></ElDialog>
+    <ElDialog v-model="editorOpen" :title="editingDraft ? '编辑方案草稿' : '新建方案草稿'" width="min(760px, 94vw)" :close-on-click-modal="!saving" :close-on-press-escape="!saving" :show-close="!saving" destroy-on-close class="recipe-editor-dialog"><DraftEditor :key="editorKey" :draft="editingDraft" :models="models" :models-loading="modelsLoading" :models-error="modelsError" :saving="saving" :error="saveError" @refresh-models="loadModels" @save="save" @cancel="editorOpen = false" /></ElDialog>
     <ElDrawer v-model="versionsOpen" title="已发布方案版本" size="min(760px, 94vw)" :destroy-on-close="false" @closed="closeVersions">
       <div class="published-drawer">
         <div class="validation-history"><span class="section-note">不可变版本由通过验证的草稿快照发布。</span><ElButton :loading="versionsLoading" @click="loadVersions()">刷新版本</ElButton></div>
@@ -354,13 +414,13 @@ onBeforeUnmount(() => { lifetime.abort(); listRequest?.abort(); historyRequest?.
             <ElAlert v-else-if="versionError" :title="versionError" type="error" :closable="false" show-icon role="alert"><ElButton link @click="selectVersion(selectedVersionId)">重试详情</ElButton></ElAlert>
             <template v-else-if="selectedVersion">
               <h3>{{ selectedVersion.bundle.name }}</h3>
-              <p class="section-note">{{ selectedVersion.bundle.algorithm }} · {{ selectedVersion.bundle.publishedByName }} 于 {{ formatTime(selectedVersion.bundle.publishedAt) }} 发布</p>
+              <p class="section-note">{{ algorithmLabels[selectedVersion.bundle.definition.algorithm] }} · {{ selectedVersion.bundle.publishedByName }} 于 {{ formatTime(selectedVersion.bundle.publishedAt) }} 发布</p>
               <h4>本草稿验证目标</h4>
               <dl class="draft-targets"><div><dt>最低精确率</dt><dd>{{ formatPercent(selectedVersion.bundle.targets.minPrecision) }}</dd></div><div><dt>最低召回率</dt><dd>{{ formatPercent(selectedVersion.bundle.targets.minRecall) }}</dd></div><div><dt>最高 p95</dt><dd>{{ formatMs(selectedVersion.bundle.targets.maxP95Ms) }}</dd></div></dl>
               <h4>发布时正式冻结目标</h4>
               <dl class="draft-targets"><div><dt>最低精确率</dt><dd>{{ formatPercent(selectedVersion.bundle.releaseTargets.minPrecision) }}</dd></div><div><dt>最低召回率</dt><dd>{{ formatPercent(selectedVersion.bundle.releaseTargets.minRecall) }}</dd></div><div><dt>最高 p95</dt><dd>{{ formatMs(selectedVersion.bundle.releaseTargets.maxP95Ms) }}</dd></div></dl>
-              <dl class="snapshot-identifiers"><div><dt>版本 ID</dt><dd>{{ selectedVersion.bundle.versionId }}</dd></div><div><dt>验证记录 ID</dt><dd>{{ selectedVersion.bundle.validationRunId }}</dd></div><div><dt>输入规格</dt><dd>{{ selectedVersion.bundle.input.width }} × {{ selectedVersion.bundle.input.height }} · {{ selectedVersion.bundle.input.requiresReference ? '需要参考图' : '无需参考图' }}</dd></div><div><dt>参考资产映射</dt><dd>{{ selectedVersion.bundle.references.length }} 张</dd></div><div><dt>版本包 SHA256</dt><dd>{{ selectedVersion.bundleHash }}</dd></div><div><dt>验证快照 SHA256</dt><dd>{{ selectedVersion.bundle.validationSnapshotHash }}</dd></div><div><dt>输入清单 SHA256</dt><dd>{{ selectedVersion.bundle.inputManifestSha256 }}</dd></div><div><dt>算法程序集 SHA256</dt><dd>{{ selectedVersion.bundle.algorithmAssemblySha256 }}</dd></div></dl>
-              <details class="recipe-snapshot"><summary>查看冻结参数</summary><dl class="recipe-settings"><div v-for="(value, key) in selectedVersion.bundle.settings" :key="key"><dt>{{ settingLabels[key] }}</dt><dd>{{ value }}</dd></div></dl></details>
+              <dl class="snapshot-identifiers"><div><dt>版本 ID</dt><dd>{{ selectedVersion.bundle.versionId }}</dd></div><div><dt>验证记录 ID</dt><dd>{{ selectedVersion.bundle.validationRunId }}</dd></div><div><dt>输入规格</dt><dd>{{ selectedVersion.bundle.input.width }} × {{ selectedVersion.bundle.input.height }} · {{ selectedVersion.bundle.input.requiresReference ? '需要参考图' : '无需参考图' }}</dd></div><div><dt>参考资产映射</dt><dd>{{ selectedVersion.bundle.references.length }} 张</dd></div><div v-if="selectedVersion.bundle.model"><dt>固定模型</dt><dd>{{ selectedVersion.bundle.model.sha256 }} · {{ (selectedVersion.bundle.model.byteLength / 1024 / 1024).toFixed(1) }} MiB · {{ selectedVersion.bundle.model.inputContract }}</dd></div><div><dt>版本包 SHA256</dt><dd>{{ selectedVersion.bundleHash }}</dd></div><div><dt>验证快照 SHA256</dt><dd>{{ selectedVersion.bundle.validationSnapshotHash }}</dd></div><div><dt>输入清单 SHA256</dt><dd>{{ selectedVersion.bundle.inputManifestSha256 }}</dd></div><div><dt>算法程序集 SHA256</dt><dd>{{ selectedVersion.bundle.algorithmAssemblySha256 }}</dd></div></dl>
+              <details class="recipe-snapshot"><summary>查看冻结参数</summary><dl v-if="selectedVersion.bundle.definition.algorithm === 'Classical'" class="recipe-settings"><div v-for="(value, key) in selectedVersion.bundle.definition.settings" :key="key"><dt>{{ settingLabels[key] }}</dt><dd>{{ value }}</dd></div></dl><dl v-else class="recipe-settings"><div v-for="(value, key) in selectedVersion.bundle.definition.thresholds" :key="key"><dt>{{ thresholdLabels[key] }}</dt><dd>{{ value }}</dd></div></dl></details>
             </template>
           </div>
         </div>

@@ -113,7 +113,15 @@ public static class BatchEndpoints
     {
         var version = publication.View();
         if (version.BundleHash != PublishedRecipeTransfer.Hash(version.Bundle)) return false;
-        var assets = await db.RecipeReferenceAssets.AsNoTracking().Where(asset => asset.RecipeVersionId == publication.Id).ToDictionaryAsync(asset => asset.Id, token);
+        var assets = await db.RecipeAssets.AsNoTracking().Where(asset => asset.RecipeVersionId == publication.Id).ToDictionaryAsync(asset => asset.Id, token);
+        var model = version.Bundle.Model;
+        if (version.Bundle.Definition is PairedOnnxRecipeDefinition paired)
+        {
+            if (model is null || model.Sha256 != paired.ModelSha256 || model.InputContract != RecipeModelInput.PairedGrayAbsDiff640V1 ||
+                !assets.TryGetValue(model.AssetId, out var modelAsset) || modelAsset.Content.Length != model.ByteLength ||
+                Convert.ToHexStringLower(SHA256.HashData(modelAsset.Content)) != model.Sha256) return false;
+        }
+        else if (version.Bundle.Definition is not ClassicalRecipeDefinition || model is not null) return false;
         return version.Bundle.References.Count > 0 && version.Bundle.References.All(reference => assets.TryGetValue(reference.AssetId, out var asset) &&
             asset.Content.Length == reference.ByteLength && Convert.ToHexStringLower(SHA256.HashData(asset.Content)) == reference.Sha256);
     }

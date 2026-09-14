@@ -21,7 +21,7 @@ var scoreThresholds = modelMode ? OnnxScoreThresholds.FromClassOrder(options["--
     .Select(value => double.Parse(value, CultureInfo.InvariantCulture)).ToArray()) : null;
 var json = new JsonSerializerOptions(JsonSerializerDefaults.Web);
 var initializationWatch = Stopwatch.StartNew();
-using var onnx = modelMode ? new OnnxDetector(options["--model"], options["--model-sha256"]) : null;
+using var onnx = modelMode ? new OnnxDetector(File.ReadAllBytes(options["--model"]), options["--model-sha256"]) : null;
 var classical = modelMode ? null : new ClassicalDetector(
     JsonSerializer.Deserialize<ClassicalSettings>(File.ReadAllText(options["--recipe"]), json)
         ?? throw new InvalidDataException("Recipe is empty."));

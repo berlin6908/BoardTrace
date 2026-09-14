@@ -107,35 +107,55 @@ public sealed class RecipeValidationWorker(IServiceScopeFactory scopes, IConfigu
         try
         {
             if (inputs.Length != 200 || truths.Count != 200) throw new InvalidDataException("验证人口不是固定 200 张。");
-            var dto = JsonSerializer.Deserialize<RecipeClassicalSettings>(run.SettingsJson)!;
+            var definition = JsonSerializer.Deserialize<RecipeDefinition>(run.DefinitionJson)!;
             var targets = JsonSerializer.Deserialize<RecipeTargets>(run.TargetsJson)!;
-            var detector = new ClassicalDetector(new ClassicalSettings(dto.BinarizationThreshold, dto.EdgeTolerance,
-                dto.MinimumArea, dto.ClosingSize, dto.BoxPadding, dto.MaximumTranslation,
-                dto.MinimumAlignmentResponse));
+            var paired = definition as PairedOnnxRecipeDefinition;
+            var model = paired is null ? null : await db.RecipeModels.AsNoTracking()
+                .SingleOrDefaultAsync(x => x.Sha256 == paired.ModelSha256, token)
+                ?? throw new InvalidDataException("验证模型资产缺失。");
+            if (model is not null && (model.InputContract != RecipeModelInput.PairedGrayAbsDiff640V1 || model.ByteLength != model.Content.Length))
+                throw new InvalidDataException("验证模型资产声明不符。");
+            using var onnx = model is null ? null : new OnnxDetector(model.Content, paired!.ModelSha256);
+            var thresholds = paired is null ? null : new OnnxScoreThresholds(paired.Thresholds.Open, paired.Thresholds.Short,
+                paired.Thresholds.Mousebite, paired.Thresholds.Spur, paired.Thresholds.Copper, paired.Thresholds.PinHole);
+            ClassicalDetector? classical = null;
+            if (definition is ClassicalRecipeDefinition { Settings: var dto })
+                classical = new ClassicalDetector(new ClassicalSettings(dto.BinarizationThreshold, dto.EdgeTolerance,
+                    dto.MinimumArea, dto.ClosingSize, dto.BoxPadding, dto.MaximumTranslation, dto.MinimumAlignmentResponse));
+            if (onnx is null && classical is null) throw new InvalidDataException("验证算法不支持。");
             var rows = new List<RecipeValidationRow>(200);
+            var scores = new List<RecipeScore>(200);
+            var sampleIds = new HashSet<string>(StringComparer.Ordinal);
             foreach (var input in inputs)
             {
                 token.ThrowIfCancellationRequested();
                 var sampleId = input.RootElement.GetProperty("sampleId").GetString()!;
+                if (!sampleIds.Add(sampleId)) throw new InvalidDataException($"重复输入样本：{sampleId}");
                 if (!truths.TryGetValue(sampleId, out var truth))
                     throw new InvalidDataException($"缺少真值行：{sampleId}");
                 var truthBoxes = truth.RootElement.GetProperty("defects").EnumerateArray()
-                    .Select(x => x.GetProperty("box").EnumerateArray().Select(n => n.GetDouble()).ToArray()).ToArray();
+                    .Select(x => new RecipeTruth(x.GetProperty("box").EnumerateArray().Select(n => n.GetDouble()).ToArray(),
+                        x.GetProperty("classId").GetInt32())).ToArray();
+                if (truthBoxes.Any(x => x.ClassId is < 1 or > 6)) throw new InvalidDataException("验证真值类别不在 1–6 范围。");
                 RecipeValidationRow row;
+                RecipeScore score;
                 try
                 {
                     var tested = await ReadAndCheck(input.RootElement, "image", "imageSha256", dataRoot, token);
                     var reference = await ReadAndCheck(input.RootElement, "reference", "referenceSha256", dataRoot, token);
-                    var result = detector.Detect(tested, reference, token);
+                    var result = onnx is null ? classical!.Detect(tested, reference, token)
+                        : onnx.Detect(tested, reference, thresholds!, token);
                     var predictions = result.Defects.Select(x => new RecipePrediction(x.Box, x.ClassId, x.Score, x.Area)).ToArray();
-                    var (tp, fp, fn) = Score(predictions, truthBoxes);
-                    row = new(sampleId, "Completed", result.Decision, predictions, null, result.ElapsedMs, tp, fp, fn);
+                    score = RecipeScoring.Match(predictions, truthBoxes, paired is not null);
+                    row = new(sampleId, "Completed", result.Decision, predictions, null, result.ElapsedMs, score.Tp, score.Fp, score.Fn);
                 }
                 catch (Exception error) when (error is IOException or InvalidDataException or OpenCvSharp.OpenCVException or ArgumentException)
                 {
                     row = new(sampleId, "Failed", "NotEvaluated", [], error.Message, null, 0, 0, truthBoxes.Length);
+                    score = RecipeScoring.Match([], truthBoxes, paired is not null);
                 }
                 rows.Add(row);
+                scores.Add(score);
                 run.Processed = rows.Count;
                 await db.SaveChangesAsync(token);
             }
@@ -157,7 +177,11 @@ public sealed class RecipeValidationWorker(IServiceScopeFactory scopes, IConfigu
                 recall >= targets.MinRecall && p95 <= targets.MaxP95Ms, rows, assemblyHash,
                 System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription,
                 $"{Environment.MachineName}; {System.Runtime.InteropServices.RuntimeInformation.OSDescription}; {System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture}; CPUs={Environment.ProcessorCount}",
-                "首个成功检测样本单列冷启动；p50/p95 为其余成功样本的解码、配准、检测和后处理耗时。失败图不计耗时分位，但计入 200 张人口及 FN。");
+                "首个成功检测样本单列冷启动；p50/p95 为其余成功样本的双图解码、检查、预处理、检测和后处理耗时；不含文件读取/hash及模型加载。失败图不计耗时分位，但计入 200 张人口及 FN。",
+                paired is null ? "Localization" : "ClassAware",
+                paired is null ? [] : Enumerable.Range(1, 6).Select(id => RecipeScoring.Metrics(id,
+                    scores.Sum(x => x.Classes[id - 1].Tp), scores.Sum(x => x.Classes[id - 1].Fp), scores.Sum(x => x.Classes[id - 1].Fn))).ToArray(),
+                onnx?.SessionInitializationMs, onnx?.ModelSha256);
         }
         finally
         {
@@ -181,42 +205,6 @@ public sealed class RecipeValidationWorker(IServiceScopeFactory scopes, IConfigu
 
     private static async Task<string> HashFile(string path, CancellationToken token) =>
         Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(path, token)));
-
-    private static (int Tp, int Fp, int Fn) Score(IReadOnlyList<RecipePrediction> predictions, double[][] truth)
-    {
-        var used = new bool[truth.Length];
-        var tp = 0;
-        var fp = 0;
-        foreach (var prediction in predictions.OrderByDescending(x => x.Score))
-        {
-            var bestIndex = -1;
-            var best = 0.5;
-            for (var i = 0; i < truth.Length; i++)
-            {
-                if (used[i]) continue;
-                var overlap = IoU(prediction.Box, truth[i]);
-                if (overlap >= 0.5 && (bestIndex < 0 || overlap > best))
-                {
-                    best = overlap;
-                    bestIndex = i;
-                }
-            }
-            if (bestIndex >= 0) { used[bestIndex] = true; tp++; }
-            else fp++;
-        }
-        return (tp, fp, truth.Length - tp);
-    }
-
-    private static double IoU(double[] a, double[] b)
-    {
-        var width = Math.Max(0, Math.Min(a[2], b[2]) - Math.Max(a[0], b[0]));
-        var height = Math.Max(0, Math.Min(a[3], b[3]) - Math.Max(a[1], b[1]));
-        var intersection = width * height;
-        var areaA = Math.Max(0, a[2] - a[0]) * Math.Max(0, a[3] - a[1]);
-        var areaB = Math.Max(0, b[2] - b[0]) * Math.Max(0, b[3] - b[1]);
-        var union = areaA + areaB - intersection;
-        return union <= 0 ? 0 : intersection / union;
-    }
 
     private static double Percentile(double[] values, double q)
     {

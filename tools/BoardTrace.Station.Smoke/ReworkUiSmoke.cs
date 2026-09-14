@@ -137,7 +137,7 @@ public static partial class Program
                 batch.Batch.Id, original.Id, order.Id, repeated.Id, InspectionTransfer.Hash(original),
                 InspectionTransfer.Hash(repeated), context.Options.DatabasePath, output));
             await WriteLive(Path.Combine(context.Output, "before-final-review.json"), new { batch = centralBatch, queue, refreshed, child,
-                scope = "真实WPF/SQL质量链；同一缺陷图再次检测仍Fail，非修复后的真实产品；方案行是非质量发布夹具。" });
+                scope = "真实WPF/SQL质量链；同一缺陷图再次检测仍Fail，非修复后的真实产品；方案版本由运行上下文指定，发布来源见本次运行证据。" });
             if (scope == "closure-live")
                 await VerifyClosureLive(context, output, model, window, store, process, quality, batch, original, repeated);
         }

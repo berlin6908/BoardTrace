@@ -17,10 +17,10 @@ using OpenCvSharp;
 
 namespace BoardTrace.Server.Tests;
 
-public sealed class PublicationTests
+public sealed partial class PublicationTests
 {
     private static SaveRecipeDraft Draft(int padding = 0) => new("generated-image-publication-test",
-        new RecipeClassicalSettings(BoxPadding: padding), new RecipeTargets(0.99, 0.99, 500));
+        new ClassicalRecipeDefinition(new RecipeClassicalSettings(BoxPadding: padding)), new RecipeTargets(0.99, 0.99, 500));
 
     [Fact]
     public async Task LowDraftTargetsCannotBypassMissingUnfrozenOrHigherIndependentTargets()
@@ -28,7 +28,7 @@ public sealed class PublicationTests
         await using var server = await PublicationServer.CreateAsync();
         var draft = await server.CreateDraftAsync(Draft() with
         {
-            Settings = new RecipeClassicalSettings(MinimumArea: 10000, BoxPadding: 0),
+            Definition = new ClassicalRecipeDefinition(new RecipeClassicalSettings(MinimumArea: 10000, BoxPadding: 0)),
             Targets = new RecipeTargets(0, 0, 500)
         });
         var run = await server.ValidateAsync(draft.Id);
@@ -134,8 +134,8 @@ public sealed class PublicationTests
         Assert.Equal(HttpStatusCode.Created, nextPublication.StatusCode);
         var nextVersion = (await nextPublication.Content.ReadFromJsonAsync<PublishedRecipeVersion>())!;
         Assert.NotEqual(version.Bundle.VersionId, nextVersion.Bundle.VersionId);
-        Assert.Equal(1, nextVersion.Bundle.Settings.BoxPadding);
-        Assert.Equal(0, version.Bundle.Settings.BoxPadding);
+        Assert.Equal(1, Assert.IsType<ClassicalRecipeDefinition>(nextVersion.Bundle.Definition).Settings.BoxPadding);
+        Assert.Equal(0, Assert.IsType<ClassicalRecipeDefinition>(version.Bundle.Definition).Settings.BoxPadding);
         Assert.Equal(new RecipeTargets(0.999, 0.999, 400), nextVersion.Bundle.ReleaseTargets);
 
         File.Delete(server.ReleasePolicyPath);
@@ -159,7 +159,7 @@ public sealed class PublicationTests
     public async Task PublicationRejectsUnmetTargetsStaleSnapshotsAndMissingAssets()
     {
         await using var server = await PublicationServer.CreateAsync();
-        var missedDraft = await server.CreateDraftAsync(Draft() with { Settings = new RecipeClassicalSettings(MinimumArea: 10000, BoxPadding: 0) });
+        var missedDraft = await server.CreateDraftAsync(Draft() with { Definition = new ClassicalRecipeDefinition(new RecipeClassicalSettings(MinimumArea: 10000, BoxPadding: 0)) });
         var missed = await server.ValidateAsync(missedDraft.Id);
         Assert.False(missed.Report!.MeetsTargets);
         Assert.Equal(200, missed.Report.Fn);
@@ -240,7 +240,7 @@ public sealed class PublicationTests
         }
     }
 
-    private sealed class PublicationServer : IAsyncDisposable
+    private sealed partial class PublicationServer : IAsyncDisposable
     {
         private readonly string name = "BoardTrace_Publication_" + Guid.NewGuid().ToString("N");
         private readonly string directory = Path.Combine(Path.GetTempPath(), "BoardTrace_Publication_" + Guid.NewGuid().ToString("N"));
@@ -289,7 +289,7 @@ public sealed class PublicationTests
                     await File.WriteAllBytesAsync(Path.Combine(server.directory, "data", sampleId + ".png"), bytes);
                     inputs.Add(JsonSerializer.Serialize(new { sampleId, image = sampleId + ".png", imageSha256 = Hash(bytes),
                         reference = $"reference-{group}.png", referenceSha256 = Hash(referenceBytes) }));
-                    truths.Add(JsonSerializer.Serialize(new { sampleId, defects = new[] { new { box = new[] { x, y, x + 15, y + 18 } } } }));
+                    truths.Add(JsonSerializer.Serialize(new { sampleId, defects = new[] { new { box = new[] { x, y, x + 15, y + 18 }, classId = 1 } } }));
                 }
             }
             await File.WriteAllLinesAsync(server.InputManifestPath, inputs);

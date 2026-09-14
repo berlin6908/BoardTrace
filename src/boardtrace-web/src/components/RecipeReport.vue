@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { ElAlert, ElOption, ElPagination, ElSelect, ElTable, ElTableColumn, ElTag } from 'element-plus'
-import { decisionLabels, formatMs, formatTime } from '../inspections'
-import { formatPercent, settingLabels } from '../recipes'
+import { classLabel, decisionLabels, formatMs, formatTime } from '../inspections'
+import { formatPercent, settingLabels, thresholdLabels } from '../recipes'
 import type { ValidationRun } from '../recipes'
 
 const props = defineProps<{ run: ValidationRun; currentSnapshotHash: string }>()
@@ -30,24 +30,28 @@ watch(() => props.run.id, () => { filter.value = 'all'; page.value = 1 })
       <ElTag :type="report.meetsTargets ? 'success' : 'danger'" size="large">{{ report.meetsTargets ? '达到本次快照目标' : '未达到本次快照目标' }}</ElTag>
     </div>
     <div class="report-metrics">
-      <div><span>精确率 Precision</span><strong>{{ formatPercent(report.precision) }}</strong><small :class="report.precision >= targets.minPrecision ? 'metric-pass' : 'metric-fail'">目标 ≥ {{ formatPercent(targets.minPrecision) }} · {{ report.precision >= targets.minPrecision ? '达到' : '未达' }}</small></div>
-      <div><span>召回率 Recall</span><strong>{{ formatPercent(report.recall) }}</strong><small :class="report.recall >= targets.minRecall ? 'metric-pass' : 'metric-fail'">目标 ≥ {{ formatPercent(targets.minRecall) }} · {{ report.recall >= targets.minRecall ? '达到' : '未达' }}</small></div>
-      <div><span>F1</span><strong>{{ formatPercent(report.f1) }}</strong><small>定位精确率与召回率的调和平均</small></div>
+      <div><span>{{ report.matchingMode === 'ClassAware' ? '六类同类匹配精确率' : '无类别定位精确率' }}</span><strong>{{ formatPercent(report.precision) }}</strong><small :class="report.precision >= targets.minPrecision ? 'metric-pass' : 'metric-fail'">目标 ≥ {{ formatPercent(targets.minPrecision) }} · {{ report.precision >= targets.minPrecision ? '达到' : '未达' }}</small></div>
+      <div><span>{{ report.matchingMode === 'ClassAware' ? '六类同类匹配召回率' : '无类别定位召回率' }}</span><strong>{{ formatPercent(report.recall) }}</strong><small :class="report.recall >= targets.minRecall ? 'metric-pass' : 'metric-fail'">目标 ≥ {{ formatPercent(targets.minRecall) }} · {{ report.recall >= targets.minRecall ? '达到' : '未达' }}</small></div>
+      <div><span>F1</span><strong>{{ formatPercent(report.f1) }}</strong><small>本次匹配口径的调和平均</small></div>
       <div><span>p95 检测耗时</span><strong>{{ formatMs(report.p95Ms) }}</strong><small :class="report.p95Ms <= targets.maxP95Ms ? 'metric-pass' : 'metric-fail'">目标 ≤ {{ formatMs(targets.maxP95Ms) }} · {{ report.p95Ms <= targets.maxP95Ms ? '达到' : '未达' }}</small></div>
     </div>
     <dl class="report-counts">
       <div><dt>匹配 TP</dt><dd>{{ report.tp }}</dd></div><div><dt>误检 FP</dt><dd>{{ report.fp }}</dd></div><div><dt>漏检 FN</dt><dd>{{ report.fn }}</dd></div>
       <div><dt>执行失败</dt><dd :class="report.executionFailures ? 'metric-fail' : ''">{{ report.executionFailures }} / {{ run.total }}</dd></div>
       <div><dt>p50 检测耗时</dt><dd>{{ formatMs(report.p50Ms) }}</dd></div><div><dt>首张冷启动</dt><dd>{{ formatMs(report.coldSampleMs) }}</dd></div>
+      <div><dt>ONNX 会话初始化</dt><dd>{{ formatMs(report.sessionInitializationMs) }}</dd></div>
     </dl>
     <p class="section-note">{{ report.timingDescription }}</p>
-    <p class="section-note">经典基线按不区分类别的定位匹配计算，IoU ≥ 0.5。三项目标均达到且执行失败为 0 才算达标。</p>
+    <p class="section-note">{{ report.matchingMode === 'ClassAware' ? 'PairedOnnx 按六类同类框匹配统计分类检测，不等于 mAP。' : '经典基线按不区分类别的定位框匹配统计。' }} IoU ≥ 0.5。三项目标均达到且执行失败为 0 才算达标。</p>
+    <div v-if="report.matchingMode === 'ClassAware'" class="report-class-metrics"><h4>六类检测明细</h4><ElTable :data="report.classes" row-key="classId" class="inspection-table"><ElTableColumn label="类别" min-width="115"><template #default="{ row }">{{ classLabel(row.classId) }}</template></ElTableColumn><ElTableColumn prop="tp" label="TP" width="65" /><ElTableColumn prop="fp" label="FP" width="65" /><ElTableColumn prop="fn" label="FN" width="65" /><ElTableColumn label="精确率" min-width="95"><template #default="{ row }">{{ formatPercent(row.precision) }}</template></ElTableColumn><ElTableColumn label="召回率" min-width="95"><template #default="{ row }">{{ formatPercent(row.recall) }}</template></ElTableColumn><ElTableColumn label="F1" min-width="95"><template #default="{ row }">{{ formatPercent(row.f1) }}</template></ElTableColumn></ElTable></div>
     <details class="recipe-snapshot">
       <summary>查看本次运行的参数与证据标识</summary>
-      <dl class="recipe-settings"><div v-for="(value, key) in run.snapshot.settings" :key="key"><dt>{{ settingLabels[key] }}</dt><dd>{{ value }}</dd></div></dl>
+      <dl v-if="run.snapshot.definition.algorithm === 'Classical'" class="recipe-settings"><div v-for="(value, key) in run.snapshot.definition.settings" :key="key"><dt>{{ settingLabels[key] }}</dt><dd>{{ value }}</dd></div></dl>
+      <template v-else><p class="section-note">模型 SHA256：{{ run.snapshot.definition.modelSha256 }}</p><dl class="recipe-settings"><div v-for="(value, key) in run.snapshot.definition.thresholds" :key="key"><dt>{{ thresholdLabels[key] }}</dt><dd>{{ value }}</dd></div></dl></template>
       <dl class="snapshot-identifiers">
         <div><dt>验证编号</dt><dd>{{ run.id }}</dd></div><div><dt>参数与目标快照</dt><dd>{{ run.snapshot.snapshotHash }}</dd></div>
         <div><dt>固定输入清单 SHA256</dt><dd>{{ run.snapshot.dataManifestSha256 }}</dd></div><div><dt>算法程序集 SHA256</dt><dd>{{ report.algorithmAssemblySha256 }}</dd></div>
+        <div v-if="report.modelSha256"><dt>实际模型 SHA256</dt><dd>{{ report.modelSha256 }}</dd></div>
         <div><dt>执行环境</dt><dd>{{ report.runtime }} · {{ report.machine }}</dd></div>
       </dl>
     </details>

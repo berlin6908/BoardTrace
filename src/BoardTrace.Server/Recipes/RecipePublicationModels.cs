@@ -15,12 +15,12 @@ public sealed class RecipePublication
     public required string PublishedById { get; set; }
     public required string PublishedByName { get; set; }
     public DateTimeOffset PublishedAt { get; set; }
-    public List<RecipeReferenceAsset> Assets { get; set; } = [];
+    public List<RecipeAsset> Assets { get; set; } = [];
 
     public PublishedRecipeVersion View() => new(JsonSerializer.Deserialize<PublishedRecipeBundle>(BundleJson, Json)!, BundleHash);
 }
 
-public sealed class RecipeReferenceAsset
+public sealed class RecipeAsset
 {
     public Guid Id { get; set; }
     public Guid RecipeVersionId { get; set; }

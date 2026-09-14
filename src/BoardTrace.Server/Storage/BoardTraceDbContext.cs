@@ -15,9 +15,10 @@ public sealed class BoardTraceDbContext(DbContextOptions<BoardTraceDbContext> op
     public DbSet<InspectionDefect> Defects => Set<InspectionDefect>();
     public DbSet<InspectionImage> Images => Set<InspectionImage>();
     public DbSet<RecipeDraft> RecipeDrafts => Set<RecipeDraft>();
+    public DbSet<RecipeModel> RecipeModels => Set<RecipeModel>();
     public DbSet<ValidationRun> ValidationRuns => Set<ValidationRun>();
     public DbSet<RecipePublication> RecipeVersions => Set<RecipePublication>();
-    public DbSet<RecipeReferenceAsset> RecipeReferenceAssets => Set<RecipeReferenceAsset>();
+    public DbSet<RecipeAsset> RecipeAssets => Set<RecipeAsset>();
     public DbSet<BatchEntity> Batches => Set<BatchEntity>();
     public DbSet<FirstArticleApproval> FirstArticleApprovals => Set<FirstArticleApproval>();
     public DbSet<BatchExecutionSession> BatchExecutionSessions => Set<BatchExecutionSession>();
@@ -69,6 +70,9 @@ public sealed class BoardTraceDbContext(DbContextOptions<BoardTraceDbContext> op
         model.Entity<InspectionImage>().ToTable("InspectionImages").HasKey(x => new { x.InspectionId, x.Kind });
         model.Entity<InspectionImage>().Property(x => x.Kind).HasMaxLength(16);
         model.Entity<RecipeDraft>().ToTable("RecipeDrafts").HasKey(x => x.Id);
+        model.Entity<RecipeModel>().ToTable("RecipeModels").HasKey(x => x.Sha256);
+        model.Entity<RecipeModel>().Property(x => x.Sha256).HasMaxLength(64).IsUnicode(false);
+        model.Entity<RecipeModel>().Property(x => x.InputContract).HasMaxLength(64).IsUnicode(false);
         model.Entity<RecipeDraft>().Property(x => x.Name).HasMaxLength(200);
         model.Entity<RecipeDraft>().Property(x => x.SnapshotHash).HasMaxLength(64).IsUnicode(false);
         model.Entity<ValidationRun>().ToTable("ValidationRuns").HasKey(x => x.Id);
@@ -85,8 +89,8 @@ public sealed class BoardTraceDbContext(DbContextOptions<BoardTraceDbContext> op
         version.HasOne<RecipeDraft>().WithMany().HasForeignKey(x => x.DraftId).OnDelete(DeleteBehavior.Restrict);
         version.HasOne<ValidationRun>().WithMany().HasForeignKey(x => x.ValidationRunId).OnDelete(DeleteBehavior.Restrict);
         version.HasMany(x => x.Assets).WithOne().HasForeignKey(x => x.RecipeVersionId).OnDelete(DeleteBehavior.Cascade);
-        model.Entity<RecipeReferenceAsset>().ToTable("RecipeReferenceAssets").HasKey(x => x.Id);
-        model.Entity<RecipeReferenceAsset>().Property(x => x.Sha256).HasMaxLength(64).IsUnicode(false);
+        model.Entity<RecipeAsset>().ToTable("RecipeAssets").HasKey(x => x.Id);
+        model.Entity<RecipeAsset>().Property(x => x.Sha256).HasMaxLength(64).IsUnicode(false);
         var batch = model.Entity<BatchEntity>();
         batch.ToTable("Batches").HasKey(x => x.Id);
         batch.Property(x => x.BatchNumber).HasMaxLength(128);

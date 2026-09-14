@@ -9,5 +9,6 @@
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
     <ProjectReference Include="../../src/BoardTrace.Station.Core/BoardTrace.Station.Core.csproj" />
     <Using Include="Xunit" />
+    <None Include="../BoardTrace.Vision.Tests/Fixtures/pixel-detector.onnx" Link="Fixtures/pixel-detector.onnx" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

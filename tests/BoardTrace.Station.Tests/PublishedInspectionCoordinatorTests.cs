@@ -32,10 +32,10 @@ public sealed class PublishedInspectionCoordinatorTests
         var recipes = new LocalRecipeStore(store.DatabasePath);
         recipes.Initialize();
         var referenceAsset = new PublishedRecipeReference("controlled-1", Guid.NewGuid(), Hash(referenceBytes), referenceBytes.Length);
-        var bundle = new PublishedRecipeBundle(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "Unit fixture version", "Classical",
-            new RecipeClassicalSettings(BoxPadding: 4), new RecipeTargets(0.99, 0.99, 100), new RecipeTargets(0.99, 0.99, 100),
+        var bundle = new PublishedRecipeBundle(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "Unit fixture version",
+            new ClassicalRecipeDefinition(new RecipeClassicalSettings(BoxPadding: 4)), new RecipeTargets(0.99, 0.99, 100), new RecipeTargets(0.99, 0.99, 100),
             new PublishedRecipeInput(640, 640, true), Hash(File.ReadAllBytes(typeof(ClassicalDetector).Assembly.Location)),
-            new string('a', 64), new string('b', 64), [referenceAsset], "engineer", "Fixture Engineer", DateTimeOffset.UtcNow);
+            new string('a', 64), new string('b', 64), [referenceAsset], null, "engineer", "Fixture Engineer", DateTimeOffset.UtcNow);
         var version = new PublishedRecipeVersion(bundle, PublishedRecipeTransfer.Hash(bundle));
         recipes.Save(version, new Dictionary<Guid, byte[]> { [referenceAsset.AssetId] = referenceBytes });
         return new Fixture(folder, store, recipes, recipes.Load(bundle.VersionId), version, referenceBytes, testedBytes);
@@ -188,7 +188,7 @@ public sealed class PublishedInspectionCoordinatorTests
     }
 
     internal sealed record Fixture(string Folder, LocalInspectionStore Store, LocalRecipeStore Recipes,
-        LoadedClassicalRecipe Loaded, PublishedRecipeVersion Version, byte[] Reference, byte[] Tested);
+        LoadedRecipe Loaded, PublishedRecipeVersion Version, byte[] Reference, byte[] Tested);
 
     private sealed class PausedSource(IImageSource source) : IImageSource
     {

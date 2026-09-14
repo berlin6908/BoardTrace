@@ -20,7 +20,7 @@ namespace BoardTrace.Server.Tests;
 public sealed class RecipeApiTests
 {
     private static SaveRecipeDraft Draft(double minRecall = 0) => new("classical-check",
-        new RecipeClassicalSettings(), new RecipeTargets(0, minRecall, 10000));
+        new ClassicalRecipeDefinition(new RecipeClassicalSettings()), new RecipeTargets(0, minRecall, 10000));
 
     [Fact]
     public async Task EngineerStartsRealValidationAndHistoryKeepsOriginalTargetsAndFailureDenominator()
@@ -155,7 +155,7 @@ public sealed class RecipeApiTests
                     imageSha256 = Convert.ToHexStringLower(SHA256.HashData(tested)), reference = "reference.png",
                     referenceSha256 = Convert.ToHexStringLower(SHA256.HashData(good)) }));
                 truthLines.Add(JsonSerializer.Serialize(new { sampleId = i.ToString("D3"),
-                    defects = i == 0 ? new[] { new { box = new[] { 10, 10, 30, 30 } } } : [] }));
+                    defects = i == 0 ? new[] { new { box = new[] { 10, 10, 30, 30 }, classId = 1 } } : [] }));
             }
             await File.WriteAllBytesAsync(Path.Combine(server.directory, "data", "reference.png"), good);
             await File.WriteAllLinesAsync(Path.Combine(server.directory, "manifests", "inputs", "validation.jsonl"), inputLines);
@@ -203,7 +203,7 @@ public sealed class RecipeApiTests
             var truthHash = Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(truthPath)));
             foreach (var (id, status) in new[] { (interruptedId, "Running"), (queuedId, "Queued") })
                 db.ValidationRuns.Add(new ValidationRun { Id = id, DraftId = draft.Id, Status = status,
-                    Name = draft.Name, SettingsJson = JsonSerializer.Serialize(draft.Settings),
+                    Name = draft.Name, DefinitionJson = JsonSerializer.Serialize<RecipeDefinition>(draft.Definition),
                     TargetsJson = JsonSerializer.Serialize(draft.Targets), SnapshotHash = draft.SnapshotHash,
                     ManifestHash = draft.DataManifestSha256, TruthHash = truthHash, Total = 200,
                     CreatedAt = DateTimeOffset.UtcNow });

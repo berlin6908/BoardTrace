@@ -11,10 +11,12 @@ public sealed record PublishedRecipeInput(int Width, int Height, bool RequiresRe
 
 public sealed record PublishedRecipeReference(string SampleId, Guid AssetId, string Sha256, int ByteLength);
 
+public sealed record PublishedRecipeModel(Guid AssetId, string Sha256, int ByteLength, string InputContract);
+
 public sealed record PublishedRecipeBundle(Guid VersionId, Guid DraftId, Guid ValidationRunId, string Name,
-    string Algorithm, RecipeClassicalSettings Settings, RecipeTargets Targets, RecipeTargets ReleaseTargets, PublishedRecipeInput Input,
+    RecipeDefinition Definition, RecipeTargets Targets, RecipeTargets ReleaseTargets, PublishedRecipeInput Input,
     string AlgorithmAssemblySha256, string InputManifestSha256, string ValidationSnapshotHash,
-    IReadOnlyList<PublishedRecipeReference> References, string PublishedById, string PublishedByName,
+    IReadOnlyList<PublishedRecipeReference> References, PublishedRecipeModel? Model, string PublishedById, string PublishedByName,
     DateTimeOffset PublishedAt);
 
 public sealed record PublishedRecipeVersion(PublishedRecipeBundle Bundle, string BundleHash);
