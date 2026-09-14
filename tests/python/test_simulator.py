@@ -2,6 +2,7 @@ import asyncio
 import io
 import json
 import socket
+import subprocess
 import sys
 import uuid
 from pathlib import Path
@@ -51,7 +52,57 @@ def test_sqlite_pending_survives_restart_and_result_is_counted_once(tmp_path):
         state.finish(original)
         new = state.begin("PCB-A", "44000063")
         assert new.session_id != original.session_id
-        assert new.sequence == 1
+        assert new.sequence == original.sequence + 1
+        assert original.product_id == "PCB-A-1"
+        assert new.product_id == "PCB-A-2"
+
+
+def test_finished_controller_restart_keeps_product_counter_across_new_session(tmp_path):
+    database = tmp_path / "controller.db"
+    with SimulatorState(database) as state:
+        original = state.begin("A", "44000062")
+        state.record_result(original, decode_output(result_registers(original)))
+        state.finish(original)
+    with SimulatorState(database) as state:
+        following = state.begin("A", "44000062")
+        assert following.session_id != original.session_id
+        assert (original.sequence, following.sequence) == (1, 2)
+        assert (original.product_id, following.product_id) == ("A-1", "A-2")
+
+
+def test_busy_probe_reserves_distinct_product_and_uint32_exhaustion_never_wraps(tmp_path):
+    with SimulatorState(tmp_path / "controller.db") as state:
+        with state.db:
+            state.db.execute("UPDATE Controller SET NextSequence=?", (0xfffffffe,))
+        trigger = state.begin("A" * 21, "44000062")
+        probe = state.reserve_probe(trigger)
+        assert len(probe.product_id) == 32
+        assert trigger.product_id == "A" * 21 + "-4294967294"
+        assert probe.product_id == "A" * 21 + "-4294967295"
+        assert state.reserve_probe(trigger) == probe
+        state.record_result(trigger, decode_output(result_registers(trigger)))
+        state.finish(trigger)
+        with pytest.raises(OverflowError, match="exhausted"):
+            state.begin("A" * 21, "44000062")
+        assert state.pending is None and state.result_count == 1
+
+
+@pytest.mark.parametrize("prefix", ["", "A" * 22, "板", "A\0B"])
+def test_invalid_prefix_cannot_reserve_a_product(tmp_path, prefix):
+    with SimulatorState(tmp_path / "controller.db") as state:
+        with pytest.raises(ValueError):
+            state.begin(prefix, "44000062")
+        assert state.pending is None
+        assert state.begin("A", "44000062").product_id == "A-1"
+
+
+def test_removed_fixed_product_cli_cannot_start_controller(tmp_path):
+    state = tmp_path / "controller.db"
+    process = subprocess.run([sys.executable, "-m", "tools.simulator", "--product-id", "OLD-FIXED",
+        "--samples", str(tmp_path / "unused.jsonl"), "--state", str(state),
+        "--output", str(tmp_path / "events.jsonl")], capture_output=True, text=True)
+    assert process.returncode != 0 and "--product-prefix" in process.stderr
+    assert not state.exists()
 
 
 def test_changed_or_unrelated_result_cannot_overwrite_ledger(tmp_path):
@@ -99,6 +150,7 @@ class ProtocolStation:
         self.history = {}
         self.accepted = 0
         self.dispositions = []
+        self.triggers = []
         self.ready = ready
         self.ready_after_ack = ready_after_ack
 
@@ -119,7 +171,10 @@ class ProtocolStation:
                 sequence = registers[9] << 16 | registers[10]
                 identity = session, sequence
                 if registers[0] and not previous_trigger:
-                    trigger = Trigger(session, sequence, "PCB-A", "44000062")
+                    product = b"".join(word.to_bytes(2, "big") for word in registers[12:28])[:registers[11]].decode("ascii")
+                    sample = b"".join(word.to_bytes(2, "big") for word in registers[29:37])[:registers[28]].decode("ascii")
+                    trigger = Trigger(session, sequence, product, sample)
+                    self.triggers.append(trigger)
                     if self.held:
                         disposition = 2 if identity == self.held.result_identity else 3
                     elif identity in self.history:
@@ -183,6 +238,11 @@ def test_actual_fc03_fc16_handshake_preserves_one_station_result(tmp_path, scena
         assert [row["kind"] for row in events].count("resultRead") == 1
         assert next(row for row in events if row["kind"] == "resultRead")["resultCode"] == 3
         assert events[-1] == {**events[-1], "kind": "finished", "resultCount": 1}
+        assert peer.triggers[0].product_id == "PCB-A-1"
+        if scenario == "duplicate-trigger":
+            assert peer.triggers == [peer.triggers[0], peer.triggers[0]]
+        elif scenario == "busy":
+            assert [trigger.product_id for trigger in peer.triggers] == ["PCB-A-1", "PCB-A-2"]
 
 
 def test_ack_timeout_restarts_same_identity_without_counting_twice(tmp_path):
@@ -251,7 +311,7 @@ def test_retried_trigger_waits_for_old_ack_low_before_new_edge(tmp_path):
         old = result_registers(trigger)
         old[0], old[1] = 2, 1
         device.setValues(16, 100, old)
-        simulator = Simulator(device, state, [trigger.sample_id], trigger.product_id, io.StringIO(), timeout=0.5)
+        simulator = Simulator(device, state, [trigger.sample_id], "PCB-A", io.StringIO(), timeout=0.5)
         simulator.heartbeat.observe(41, 0)
 
         async def station():
@@ -277,14 +337,14 @@ def test_retried_trigger_waits_for_old_ack_low_before_new_edge(tmp_path):
         asyncio.run(check(state))
 
 
-async def run_cli(tmp_path, peer, scenario="normal", timeout=2, ack_delay=2, count=1):
+async def run_cli(tmp_path, peer, scenario="normal", timeout=2, ack_delay=2, count=1, product_prefix="PCB-A"):
     samples, state_file, events_file = (tmp_path / name for name in ("samples.jsonl", "controller.db", "events.jsonl"))
     samples.write_text('{"sampleId":"44000062"}\n', encoding="utf-8")
     port = free_port()
     old_lines = len(events_file.read_text().splitlines()) if events_file.exists() else 0
     process = await asyncio.create_subprocess_exec(sys.executable, "-m", "tools.simulator",
         "--scenario", scenario, "--host", "127.0.0.1", "--port", str(port), "--count", str(count),
-        "--product-id", "PCB-A", "--samples", str(samples), "--state", str(state_file),
+        "--product-prefix", product_prefix, "--samples", str(samples), "--state", str(state_file),
         "--output", str(events_file), "--timeout", str(timeout), "--ack-delay", str(ack_delay),
         cwd=Path(__file__).resolve().parents[2], stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     task = asyncio.create_task(process.communicate())
@@ -314,6 +374,7 @@ def test_cli_normal_two_products_finish_both_ack_cycles(tmp_path):
     assert peer.accepted == 2
     assert [identity[1] for identity in peer.history] == [1, 2]
     assert len({identity[0] for identity in peer.history}) == 1
+    assert [trigger.product_id for trigger in peer.triggers] == ["PCB-A-1", "PCB-A-2"]
     events = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text().splitlines()]
     assert [row["resultCount"] for row in events if row["kind"] == "completed"] == [1, 2]
 
@@ -326,7 +387,7 @@ def test_cli_process_restart_completes_pending_and_preserves_events(tmp_path):
     with SimulatorState(state_file) as state:
         pending = state.pending
         assert pending is not None and state.result_count == 1
-    succeeded, error = asyncio.run(run_cli(tmp_path, peer, "lost-ack"))
+    succeeded, error = asyncio.run(run_cli(tmp_path, peer, "lost-ack", product_prefix="CHANGED"))
     assert succeeded == 0, error
     with SimulatorState(state_file) as state:
         assert state.pending is None and state.result_count == 1
@@ -334,4 +395,14 @@ def test_cli_process_restart_completes_pending_and_preserves_events(tmp_path):
     reads = [row for row in events if row["kind"] == "resultRead"]
     assert [row["firstRead"] for row in reads] == [True, False]
     assert {row["inspectionId"] for row in reads} == {peer.history[pending.identity].inspection_id}
+    recovered = next(row for row in events if row["kind"] == "recovering")
+    assert (recovered["product_id"], recovered["session_id"], recovered["sequence"]) == (
+        pending.product_id, pending.session_id, pending.sequence)
     assert peer.accepted == 1
+    assert pending.product_id == "PCB-A-1"
+    assert len(peer.triggers) == 1
+    following, error = asyncio.run(run_cli(tmp_path, peer, "normal", count=2))
+    assert following == 0, error
+    assert [trigger.product_id for trigger in peer.triggers] == ["PCB-A-1", "PCB-A-2"]
+    assert peer.triggers[1].sequence == pending.sequence + 1
+    assert peer.triggers[1].session_id != pending.session_id

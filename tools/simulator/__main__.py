@@ -27,7 +27,8 @@ def main():
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=1502)
     parser.add_argument("--count", type=int, default=1, help="Target total unique results in this SQLite state, including prior runs")
-    parser.add_argument("--product-id", required=True)
+    parser.add_argument("--product-prefix", required=True,
+                        help="1..21 ASCII characters; new product IDs are prefix-TriggerSequence")
     parser.add_argument("--samples", type=Path, required=True, help="JSONL containing only sampleId")
     parser.add_argument("--state", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -36,11 +37,11 @@ def main():
     args = parser.parse_args()
     if args.count < 1 or args.timeout <= 0 or args.ack_delay < 0 or not 1 <= args.port <= 65535:
         parser.error("count/timeout must be positive, ack-delay nonnegative, port 1..65535")
-    ascii_registers(args.product_id, 32)
+    ascii_registers(args.product_prefix, 21)
     samples = read_samples(args.samples)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with SimulatorState(args.state) as state, args.output.open("a", encoding="utf-8") as output:
-        simulator = Simulator(create_device(), state, samples, args.product_id, output,
+        simulator = Simulator(create_device(), state, samples, args.product_prefix, output,
                               scenario=args.scenario, count=args.count, timeout=args.timeout, ack_delay=args.ack_delay)
         asyncio.run(serve(simulator, args.host, args.port))
 

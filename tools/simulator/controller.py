@@ -16,10 +16,10 @@ def create_device():
 
 
 class Simulator:
-    def __init__(self, device, state, samples, product_id, output, *, scenario="normal", count=1,
+    def __init__(self, device, state, samples, product_prefix, output, *, scenario="normal", count=1,
                  timeout=30, ack_delay=3):
         self.device, self.state = device, state
-        self.samples, self.product_id = samples, product_id
+        self.samples, self.product_prefix = samples, product_prefix
         self.output = output
         self.scenario, self.count = scenario, count
         self.timeout, self.ack_delay = timeout, ack_delay
@@ -128,7 +128,7 @@ class Simulator:
                     output = await self.wait(lambda o: o.valid or (o.ready and not o.trigger_ack), "fresh Ready")
                     if output.valid:
                         raise ValueError("Station holds an unknown result; manual recovery required")
-                    trigger = self.state.begin(self.product_id, self.samples[self.state.result_count % len(self.samples)])
+                    trigger = self.state.begin(self.product_prefix, self.samples[self.state.result_count % len(self.samples)])
                 else:
                     trigger = self.state.pending
                     self.event("recovering", **asdict(trigger))

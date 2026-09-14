@@ -3,7 +3,7 @@ import sqlite3
 from dataclasses import asdict
 from uuid import uuid4
 
-from .protocol import Trigger, encode_input
+from .protocol import Trigger, ascii_registers, encode_input
 
 
 class SimulatorState:
@@ -27,7 +27,9 @@ class SimulatorState:
         self.recovering = self.pending is not None
         if not self.recovering:
             with self.db:
-                self.db.execute("INSERT OR REPLACE INTO Controller VALUES (1, ?, 1)", (str(uuid4()),))
+                # A new process has a new session, but never reuses a product sequence in this state.
+                self.db.execute("""INSERT INTO Controller VALUES (1, ?, 1)
+                    ON CONFLICT(Id) DO UPDATE SET SessionId=excluded.SessionId""", (str(uuid4()),))
 
     def __enter__(self):
         return self
@@ -44,14 +46,15 @@ class SimulatorState:
     def result_count(self):
         return self.db.execute("SELECT COUNT(*) FROM Results").fetchone()[0]
 
-    def begin(self, product_id, sample_id):
+    def begin(self, product_prefix, sample_id):
+        ascii_registers(product_prefix, 21)
         with self.db:
             if self.pending is not None:
                 raise ValueError("Pending trigger must complete before a new product")
             session, sequence = self.db.execute("SELECT SessionId, NextSequence FROM Controller WHERE Id=1").fetchone()
-            if sequence > 0xfffffffe:
-                session, sequence = str(uuid4()), 1
-            trigger = Trigger(session, sequence, product_id, sample_id)
+            if sequence > 0xffffffff:
+                raise OverflowError("Trigger sequence exhausted; use a new controller state and product prefix")
+            trigger = Trigger(session, sequence, f"{product_prefix}-{sequence}", sample_id)
             encode_input(trigger)
             self.db.execute("INSERT INTO Pending(Id, TriggerJson) VALUES (1, ?)", (json.dumps(asdict(trigger)),))
             self.db.execute("UPDATE Controller SET SessionId=?, NextSequence=? WHERE Id=1", (session, sequence + 1))
@@ -63,9 +66,12 @@ class SimulatorState:
             sequence = row[0]
             if sequence is None:
                 sequence = self.db.execute("SELECT NextSequence FROM Controller WHERE Id=1").fetchone()[0]
+                if sequence > 0xffffffff:
+                    raise OverflowError("Trigger sequence exhausted; cannot reserve a Busy probe")
                 self.db.execute("UPDATE Controller SET NextSequence=? WHERE Id=1", (sequence + 1,))
                 self.db.execute("UPDATE Pending SET ProbeSequence=? WHERE Id=1", (sequence,))
-        return Trigger(trigger.session_id, sequence, trigger.product_id, trigger.sample_id)
+        product_prefix = trigger.product_id.rsplit("-", 1)[0]
+        return Trigger(trigger.session_id, sequence, f"{product_prefix}-{sequence}", trigger.sample_id)
 
     @property
     def injection_done(self):
@@ -102,5 +108,5 @@ class SimulatorState:
                 raise ValueError("Cannot finish a trigger without its durable result")
             self.db.execute("DELETE FROM Pending WHERE Id=1")
             if self.recovering:
-                self.db.execute("UPDATE Controller SET SessionId=?, NextSequence=1 WHERE Id=1", (str(uuid4()),))
+                self.db.execute("UPDATE Controller SET SessionId=? WHERE Id=1", (str(uuid4()),))
         self.recovering = False

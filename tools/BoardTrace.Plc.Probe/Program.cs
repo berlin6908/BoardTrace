@@ -146,7 +146,7 @@ internal static class Program
         }
         else { start.ArgumentList.Add("-m"); start.ArgumentList.Add("tools.simulator"); }
         foreach (var arg in new[] { "--scenario", fault ? "normal" : scenario, "--host", "127.0.0.1", "--port", port.ToString(), "--count", "1",
-            "--product-id", "SIM-PLC-PRODUCT", "--samples", Path.Combine(folder, "samples.jsonl"), "--state", Path.Combine(folder, "controller.db"),
+            "--product-prefix", "SIM-PLC-PRODUCT", "--samples", Path.Combine(folder, "samples.jsonl"), "--state", Path.Combine(folder, "controller.db"),
             "--output", Path.Combine(folder, $"simulator-{attempt}.jsonl"), "--timeout", timeout.ToString(), "--ack-delay", ackDelay.ToString() }) start.ArgumentList.Add(arg);
         using var process = Process.Start(start)!;
         var stdout = process.StandardOutput.ReadToEndAsync(); var stderr = process.StandardError.ReadToEndAsync();

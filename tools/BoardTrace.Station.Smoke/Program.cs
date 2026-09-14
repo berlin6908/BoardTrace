@@ -33,7 +33,9 @@ public static partial class Program
                 throw new ArgumentException("Supported options: --server, --station, --credentials, --development-accounts, --scope, --context.");
             arguments.Add(args[index], args[index + 1]);
         }
-        var output = Path.GetFullPath($"artifacts/station/{DateTime.UtcNow:yyyyMMdd-HHmmss}");
+        var output = arguments.GetValueOrDefault("--scope") == "system-station"
+            ? Path.GetDirectoryName(Path.GetFullPath(arguments["--context"]))!
+            : Path.GetFullPath($"artifacts/station/{DateTime.UtcNow:yyyyMMdd-HHmmss}");
         Directory.CreateDirectory(output);
         using var bindingLog = new TextWriterTraceListener(Path.Combine(output, "binding-errors.log"));
         PresentationTraceSources.DataBindingSource.Listeners.Add(bindingLog);
@@ -73,7 +75,12 @@ public static partial class Program
 
     private static async Task RunAsync(string output, Dictionary<string, string> arguments)
     {
-        if (arguments.GetValueOrDefault("--scope") is "rework-live" or "rework-live-verify" or "closure-live")
+        if (arguments.GetValueOrDefault("--scope") == "system-station")
+        {
+            await VerifySystemStationAsync(arguments["--context"]);
+            return;
+        }
+        if (arguments.GetValueOrDefault("--scope") is "rework-live" or "rework-live-verify" or "closure-live" or "closure-live-resume")
         {
             await VerifyReworkLiveAsync(arguments["--scope"], arguments["--context"], output);
             return;
@@ -106,7 +113,7 @@ public static partial class Program
             await VerifyLiveSqlAsync(liveScope, arguments["--context"]);
             return;
         }
-        if (arguments.ContainsKey("--scope")) throw new ArgumentException("--scope supports batch, plc, offline, live-sql-*, rework-live, rework-live-verify, closure-live or omission for the full smoke flow.");
+        if (arguments.ContainsKey("--scope")) throw new ArgumentException("--scope supports system-station, batch, plc, offline, live-sql-*, rework-live, rework-live-verify, closure-live, closure-live-resume or omission for the full smoke flow.");
         using (var previewClient = StationAuthentication.CreatePersonnelSession(new Uri("http://127.0.0.1:1/")))
         {
             var preview = new LoginWindow(previewClient, new StationOptions("STATION-01", Path.GetFullPath("data"),

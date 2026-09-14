@@ -287,7 +287,7 @@ public static partial class Program
         var start = new ProcessStartInfo(Path.GetFullPath(".venv/Scripts/python.exe")) { UseShellExecute = false, CreateNoWindow = true,
             WorkingDirectory = Path.GetFullPath("."), RedirectStandardError = true, RedirectStandardOutput = true };
         foreach (var value in new[] { "-m", "tools.simulator", "--scenario", scenario, "--host", "127.0.0.1",
-                     "--port", port.ToString(), "--count", count.ToString(), "--product-id", "PLC-PRODUCTION",
+                     "--port", port.ToString(), "--count", count.ToString(), "--product-prefix", "PLC-PRODUCTION",
                      "--samples", samples, "--state", state, "--output", events, "--timeout", "40",
                      "--ack-delay", ackDelay.ToString() }) start.ArgumentList.Add(value);
         var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start Python PLC simulator.");

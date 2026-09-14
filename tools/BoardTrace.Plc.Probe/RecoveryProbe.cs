@@ -153,7 +153,7 @@ internal static class RecoveryProbe
     {
         var start = StartInfo(Path.Combine(root, ".venv/Scripts/python.exe"), root);
         foreach (var arg in new[] { Path.Combine(root, "tools/BoardTrace.Plc.Probe/recovery_scenarios.py"), "--scenario", "normal", "--host", "127.0.0.1",
-            "--port", port.ToString(), "--count", "1", "--product-id", "SIM-PLC-RECOVERY", "--samples", Path.Combine(folder, "samples.jsonl"),
+            "--port", port.ToString(), "--count", "1", "--product-prefix", "SIM-PLC-RECOVERY", "--samples", Path.Combine(folder, "samples.jsonl"),
             "--state", Path.Combine(folder, "controller.db"), "--output", Path.Combine(folder, "simulator.jsonl"), "--timeout", "40" }) start.ArgumentList.Add(arg);
         start.Environment["BOARDTRACE_PLC_PROBE_FAULT"] = scenario;
         start.Environment["BOARDTRACE_PLC_PROBE_FOLDER"] = folder;
