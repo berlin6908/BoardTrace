@@ -13,6 +13,7 @@ public sealed record CachedBatchState(BatchDefinition Batch, BatchStatus Status,
 }
 
 public sealed record InspectionAcceptance(InspectionRecord Record, bool IsNew);
+public sealed record CachedBatchResume(CachedBatchState Batch, byte[] ProtectedPayload);
 
 public sealed partial class LocalInspectionStore
 {
@@ -34,6 +35,11 @@ public sealed partial class LocalInspectionStore
                 BatchId TEXT NOT NULL REFERENCES CachedBatches(Id),
                 ExecutionSession TEXT
             );
+            CREATE TABLE IF NOT EXISTS OfflineBatchResume (
+                Slot INTEGER PRIMARY KEY CHECK(Slot=1) REFERENCES ActiveBatch(Slot) ON DELETE CASCADE,
+                SessionId TEXT NOT NULL,
+                ProtectedPayload BLOB NOT NULL
+            );
             CREATE UNIQUE INDEX IF NOT EXISTS IX_Inspections_BatchSequence ON Inspections(
                 json_extract(Document, '$.batchId'), json_extract(Document, '$.productionSequence'))
                 WHERE json_extract(Document, '$.purpose')='Production';
@@ -45,6 +51,21 @@ public sealed partial class LocalInspectionStore
     {
         using var connection = Open();
         return ReadActiveBatch(connection, null);
+    }
+
+    public CachedBatchResume? ReadBatchResume()
+    {
+        using var connection = Open();
+        using var transaction = connection.BeginTransaction(deferred: true);
+        var active = ReadActiveBatch(connection, transaction);
+        if (active?.Session is not { } session) return null;
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT ProtectedPayload FROM OfflineBatchResume WHERE Slot=1 AND SessionId=$session;";
+        command.Parameters.AddWithValue("$session", session.Id.ToString());
+        var payload = command.ExecuteScalar() as byte[];
+        transaction.Commit();
+        return payload is null ? null : new CachedBatchResume(active, payload);
     }
 
     public StoredInspection? ReadPassedFirstArticle(Guid batchId)
@@ -147,10 +168,17 @@ public sealed partial class LocalInspectionStore
             """;
         select.Parameters.AddWithValue("$id", batch.Id.ToString());
         select.ExecuteNonQuery();
+        if (active?.Batch.Id != batch.Id)
+        {
+            using var clear = connection.CreateCommand();
+            clear.Transaction = transaction;
+            clear.CommandText = "DELETE FROM OfflineBatchResume WHERE Slot=1;";
+            clear.ExecuteNonQuery();
+        }
         transaction.Commit();
     }
 
-    public void SaveExecutionSession(BatchExecutionSession session)
+    public void SaveExecutionSession(BatchExecutionSession session, byte[]? resumePayload)
     {
         using var connection = Open();
         using var transaction = connection.BeginTransaction();
@@ -171,15 +199,37 @@ public sealed partial class LocalInspectionStore
         command.Parameters.AddWithValue("$session", JsonSerializer.Serialize(session, Json));
         command.Parameters.AddWithValue("$id", active.Batch.Id.ToString());
         command.ExecuteNonQuery();
+        using var resume = connection.CreateCommand();
+        resume.Transaction = transaction;
+        if (resumePayload is null)
+        {
+            resume.CommandText = "DELETE FROM OfflineBatchResume WHERE Slot=1;";
+        }
+        else
+        {
+            resume.CommandText = """
+                INSERT INTO OfflineBatchResume(Slot,SessionId,ProtectedPayload) VALUES(1,$session,$payload)
+                ON CONFLICT(Slot) DO UPDATE SET SessionId=excluded.SessionId,ProtectedPayload=excluded.ProtectedPayload;
+                """;
+            resume.Parameters.AddWithValue("$session", session.Id.ToString());
+            resume.Parameters.Add("$payload", SqliteType.Blob).Value = resumePayload;
+        }
+        resume.ExecuteNonQuery();
         transaction.Commit();
     }
 
     public void ClearExecutionSession()
     {
         using var connection = Open();
+        using var transaction = connection.BeginTransaction();
         using var command = connection.CreateCommand();
-        command.CommandText = "UPDATE ActiveBatch SET ExecutionSession=NULL WHERE Slot=1;";
+        command.Transaction = transaction;
+        command.CommandText = """
+            UPDATE ActiveBatch SET ExecutionSession=NULL WHERE Slot=1;
+            DELETE FROM OfflineBatchResume WHERE Slot=1;
+            """;
         command.ExecuteNonQuery();
+        transaction.Commit();
     }
 
     public void LeaveBatch()

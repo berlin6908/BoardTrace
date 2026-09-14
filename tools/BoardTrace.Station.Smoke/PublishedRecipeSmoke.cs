@@ -43,8 +43,8 @@ public static partial class Program
         var cache = new LocalRecipeStore(options.DatabasePath);
         cache.Initialize();
         cache.Save(version, assets);
-        using var personnel = PersonnelClient(new RecipeUiHandler());
-        await using var model = new StationViewModel(options, OfflineOperator, personnel);
+        using var personnel = PersonnelSession(new RecipeUiHandler());
+        await using var model = new StationViewModel(options, OfflineOperator, personnel, false);
         var window = new MainWindow { DataContext = model };
         window.Show();
         await model.InitializeAsync();

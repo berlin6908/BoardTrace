@@ -34,14 +34,15 @@ public static partial class Program
             JsonSerializer.Serialize(new StationCredentials("batch-device", BatchUiHttpFixture.Password)));
         var state = Path.Combine(output, "simulator-state.db");
         var events = Path.Combine(output, "simulator-events.jsonl");
+        Guid pendingFourthId = Guid.Empty;
         using var available = new TcpListener(IPAddress.Loopback, 0);
         available.Start();
         var port = ((IPEndPoint)available.LocalEndpoint).Port;
         available.Stop();
 
-        var personnel = StationAuthentication.CreateClient(fixture.Address);
-        var actor = await StationAuthentication.LoginOperatorAsync(personnel, new("batch-operator-1", BatchUiHttpFixture.Password));
-        await using (var model = new StationViewModel(options, actor, personnel))
+        var personnel = StationAuthentication.CreatePersonnelSession(fixture.Address);
+        var actor = await StationAuthentication.LoginOperatorAsync(personnel.Client, new("batch-operator-1", BatchUiHttpFixture.Password));
+        await using (var model = new StationViewModel(options, actor, personnel, false))
         {
             var window = new MainWindow { DataContext = model };
             window.Show();
@@ -93,6 +94,7 @@ public static partial class Program
                     await AwaitBatchUiAsync(() => EventExists(events, "ackWithheld"), "PLC withheld ACK");
                     await AwaitBatchUiAsync(() => Production(new LocalInspectionStore(options.DatabasePath)).Length == 4, "fourth local result");
                     var fourth = Production(new LocalInspectionStore(options.DatabasePath)).Single(record => record.ProductionSequence == 4);
+                    pendingFourthId = fourth.Id;
                     Require(new LocalInspectionStore(options.DatabasePath).ReadUnacknowledgedPlc()?.Record.Id == fourth.Id,
                         "Lost ACK did not leave the original committed inspection pending.");
                     await SnapshotAsync(window, Path.Combine(output, "22-plc-awaiting-ack.png"));
@@ -106,9 +108,59 @@ public static partial class Program
             finally { window.Close(); }
         }
 
-        var newPersonnel = StationAuthentication.CreateClient(fixture.Address);
-        var sameActor = await StationAuthentication.LoginOperatorAsync(newPersonnel, new("batch-operator-1", BatchUiHttpFixture.Password));
-        await using (var restarted = new StationViewModel(options, sameActor, newPersonnel))
+        // Without a person or even an input manifest, the station must return the
+        // already committed result to the controller. It cannot accept new work.
+        var archiveOptions = options with { ManifestPath = Path.Combine(directory, "missing-manifest.jsonl") };
+        await using (var archive = new StationViewModel(archiveOptions, null, null, false))
+        {
+            var window = new MainWindow { DataContext = archive };
+            window.Show();
+            try
+            {
+                await archive.InitializeAsync();
+                var store = new LocalInspectionStore(options.DatabasePath);
+                var original = store.Get(pendingFourthId)!;
+                Require(original is { Purpose: InspectionPurpose.Production, ProductionSequence: 4, ControllerSessionId: not null, TriggerSequence: > 0 }
+                    && store.ReadUnacknowledgedPlc()?.Record.Id == pendingFourthId,
+                    "Archive recovery did not find the fourth committed physical identity.");
+                archive.SelectedHistory = archive.History.Single(row => row.Id == pendingFourthId);
+                await archive.ViewHistoryCommand.ExecuteAsync(null);
+                Require(archive.InspectionId == pendingFourthId.ToString() && archive.TestedImage is not null && archive.ReferenceImage is not null
+                    && archive.DefectOverlays.Count == original.Defects.Count && archive.Decision == StationViewModel.DecisionLabel(original.Decision),
+                    "Anonymous archive view did not show the original pending PLC image and verdict.");
+                Require(archive.StartPlcCommand.CanExecute(null) && !archive.RunCommand.CanExecute(null),
+                    "Missing manifest blocked the PLC recovery transport or permitted new production.");
+                archive.PlcHost = "127.0.0.1";
+                archive.PlcPort = port.ToString();
+                var advertisedReady = false;
+                archive.PropertyChanged += (_, change) =>
+                {
+                    if (change.PropertyName == nameof(archive.PlcSignals) && archive.PlcSignals.Contains("就绪 是", StringComparison.Ordinal))
+                        advertisedReady = true;
+                };
+                await SnapshotAsync(window, Path.Combine(output, "23-plc-archive-pending.png"));
+                await RunScenarioAsync(archive, "normal", 4, port, simulatorSamples, state, events, output);
+                var after = store.Get(pendingFourthId)!;
+                Require(store.ReadUnacknowledgedPlc() is null && Production(store).Length == 4 && !advertisedReady
+                    && archive.PlcSignals.Contains("就绪 否", StringComparison.Ordinal)
+                    && after.Id == original.Id && after.ProductionSequence == original.ProductionSequence
+                    && after.ControllerSessionId == original.ControllerSessionId && after.TriggerSequence == original.TriggerSequence
+                    && after.TestedImage!.SequenceEqual(original.TestedImage!) && after.ReferenceImage!.SequenceEqual(original.ReferenceImage!),
+                    "Anonymous PLC ACK changed the original result, accepted new work, or advertised Ready.");
+                var recovered = File.ReadLines(events).Select(line => JsonDocument.Parse(line))
+                    .Where(row => row.RootElement.GetProperty("kind").GetString() == "resultRead"
+                        && row.RootElement.GetProperty("inspectionId").GetGuid() == pendingFourthId).ToArray();
+                Require(recovered.Length == 2 && recovered.Last().RootElement.GetProperty("recovered").GetBoolean()
+                    && EventExists(events, "resultsAck") && EventExists(events, "completed"),
+                    "Controller did not query and ACK the same pending result over actual Modbus.");
+                await SnapshotAsync(window, Path.Combine(output, "24-plc-anonymous-ack.png"));
+            }
+            finally { window.Close(); }
+        }
+
+        var newPersonnel = StationAuthentication.CreatePersonnelSession(fixture.Address);
+        var sameActor = await StationAuthentication.LoginOperatorAsync(newPersonnel.Client, new("batch-operator-1", BatchUiHttpFixture.Password));
+        await using (var restarted = new StationViewModel(options, sameActor, newPersonnel, false))
         {
             var window = new MainWindow { DataContext = restarted };
             window.Show();
@@ -117,24 +169,23 @@ public static partial class Program
                 await restarted.InitializeAsync();
                 Require(restarted.ActiveBatchNumber == fixture.Batch.BatchNumber && restarted.ActiveRecipeIdentity == fixture.Version.Bundle.VersionId.ToString()
                     && !restarted.RunCommand.CanExecute(null), "Cold restart lost the fixed batch/recipe or inherited the old online start.");
-                Require(new LocalInspectionStore(options.DatabasePath).ReadUnacknowledgedPlc() is { Record.ProductionSequence: 4 },
-                    "Cold restart lost the pending PLC result.");
+                Require(new LocalInspectionStore(options.DatabasePath).ReadUnacknowledgedPlc() is null,
+                    "Anonymous PLC ACK was not durable before online restart.");
                 ((Expander)window.FindName("PlcExpander")).IsExpanded = true;
                 restarted.PlcHost = "127.0.0.1";
                 restarted.PlcPort = port.ToString();
-                await SnapshotAsync(window, Path.Combine(output, "23-plc-restarted-pending.png"));
-                await RunScenarioAsync(restarted, "normal", 4, port, simulatorSamples, state, events, output);
+                await SnapshotAsync(window, Path.Combine(output, "25-plc-restarted-after-ack.png"));
                 var store = new LocalInspectionStore(options.DatabasePath);
                 Require(store.ReadUnacknowledgedPlc() is null && Production(store).Length == 4,
-                    "Recovered ACK re-ran an image or left the original result pending.");
+                    "Recovered ACK re-ran an image or left the original result pending before new login.");
                 await restarted.StartBatchCommand.ExecuteAsync(null);
                 Require(restarted.RunCommand.CanExecute(null), "New process did not require and obtain its own online batch start.");
-                await SnapshotAsync(window, Path.Combine(output, "24-plc-ack-recovered.png"));
+                await SnapshotAsync(window, Path.Combine(output, "26-plc-new-shift-started.png"));
                 await RunScenarioAsync(restarted, "normal", 5, port, simulatorSamples, state, events, output);
                 await CheckProductionAsync(restarted, options.DatabasePath, fixture, 5, source.SampleId, reference, tested);
                 Require(!restarted.RunCommand.CanExecute(null) && restarted.BatchStateText.Contains("计划数量已接收完毕"),
                     "Final planned item unexpectedly left the batch ready for another inspection.");
-                await SnapshotAsync(window, Path.Combine(output, "25-plc-plan-complete.png"));
+                await SnapshotAsync(window, Path.Combine(output, "27-plc-plan-complete.png"));
                 await AwaitBatchUiAsync(() => fixture.Records.Count == 7 && store.PendingCount() == 0, "all fixture uploads");
                 var records = Production(store);
                 Require(records.Select(record => record.ProductionSequence).Order().SequenceEqual(new int?[] { 1, 2, 3, 4, 5 })

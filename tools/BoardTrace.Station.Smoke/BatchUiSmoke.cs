@@ -33,9 +33,9 @@ public static partial class Program
             DataRoot = directory, ManifestPath = manifest, DatabasePath = Path.Combine(output, "batch-ui.db"),
             CredentialsPath = Path.Combine(output, "batch-ui-device.json") };
         await File.WriteAllTextAsync(options.CredentialsPath, JsonSerializer.Serialize(new StationCredentials("batch-device", BatchUiHttpFixture.Password)));
-        var personnel = StationAuthentication.CreateClient(fixture.Address);
-        var actor = await StationAuthentication.LoginOperatorAsync(personnel, new("batch-operator-1", BatchUiHttpFixture.Password));
-        await using var model = new StationViewModel(options, actor, personnel);
+        var personnel = StationAuthentication.CreatePersonnelSession(fixture.Address);
+        var actor = await StationAuthentication.LoginOperatorAsync(personnel.Client, new("batch-operator-1", BatchUiHttpFixture.Password));
+        await using var model = new StationViewModel(options, actor, personnel, false);
         var window = new MainWindow { DataContext = model };
         window.Show();
         try
@@ -114,9 +114,9 @@ public static partial class Program
             fixture.Mode = BatchUiNetwork.Online;
             await model.SignOutCommand.ExecuteAsync(null);
             Require(model.OperatorName == "未登录" && store.ReadActiveBatch()!.Session is null, "Sign-out retained the former operator session.");
-            var nextPersonnel = StationAuthentication.CreateClient(fixture.Address);
-            var nextActor = await StationAuthentication.LoginOperatorAsync(nextPersonnel, new("batch-operator-2", BatchUiHttpFixture.Password));
-            model.SignIn(nextActor, nextPersonnel);
+            var nextPersonnel = StationAuthentication.CreatePersonnelSession(fixture.Address);
+            var nextActor = await StationAuthentication.LoginOperatorAsync(nextPersonnel.Client, new("batch-operator-2", BatchUiHttpFixture.Password));
+            model.SignIn(nextActor, nextPersonnel, false);
             Require(!model.RunCommand.CanExecute(null) && model.StartBatchCommand.CanExecute(null), "A new operator inherited the prior production authorization.");
             await model.StartBatchCommand.ExecuteAsync(null);
             var nextSession = store.ReadActiveBatch()!.Session!;

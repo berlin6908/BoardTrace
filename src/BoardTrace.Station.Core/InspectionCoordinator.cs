@@ -72,7 +72,8 @@ public sealed class InspectionCoordinator
         SetPublishedRecipe(recipe);
     });
 
-    public void StartBatch(BatchExecutionSession session) => ChangeWhileIdle(() => store.SaveExecutionSession(session));
+    public void StartBatch(BatchExecutionSession session, byte[]? resumePayload) =>
+        ChangeWhileIdle(() => store.SaveExecutionSession(session, resumePayload));
 
     public void EndOperatorSession()
     {

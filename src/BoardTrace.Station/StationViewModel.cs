@@ -40,7 +40,10 @@ public sealed partial class StationViewModel : ObservableObject, IAsyncDisposabl
     private readonly InspectionCoordinator coordinator;
     private readonly HttpClient uploadClient;
     private InspectionUploader? uploader;
-    private HttpClient? operatorClient;
+    private StationPersonnelSession? personnelSession;
+    private HttpClient? operatorClient => personnelSession?.Client;
+    private readonly bool resumeBatch;
+    private bool archiveReady;
     private CurrentUser? currentOperator;
     private bool signingOut;
     private bool sessionExpired;
@@ -64,18 +67,20 @@ public sealed partial class StationViewModel : ObservableObject, IAsyncDisposabl
     private string uploadStatus = "等待同步";
     private string uploadNotice = "检测完成后自动上传。";
 
-    public StationViewModel(StationOptions options, CurrentUser user, HttpClient operatorClient)
+    public StationViewModel(StationOptions options, CurrentUser? user, StationPersonnelSession? personnel, bool resumeBatch)
     {
         this.options = options;
-        currentOperator = StationAuthentication.RequireOperator(user);
-        this.operatorClient = operatorClient;
+        currentOperator = user is null ? null : StationAuthentication.RequireOperator(user);
+        if (user is not null) ArgumentNullException.ThrowIfNull(personnel);
+        personnelSession = personnel;
+        this.resumeBatch = resumeBatch;
         store = new LocalInspectionStore(options.DatabasePath);
         coordinator = new InspectionCoordinator(store, new ClassicalSettings());
         uploadClient = StationAuthentication.CreateClient(options.ServerUrl);
         batchDeviceClient = StationAuthentication.CreateClient(options.ServerUrl);
         RunCommand = new AsyncRelayCommand(RunAsync, () => CanEdit && !plcRunning && CanRunInspection && !coordinator.IsFaulted && SelectedSample != null && !string.IsNullOrWhiteSpace(ProductId));
-        ViewHistoryCommand = new AsyncRelayCommand(ViewHistoryAsync, () => SelectedHistory != null && CanEdit);
-        SignOutCommand = new AsyncRelayCommand(SignOutAsync, () => currentOperator != null && !stopping && !signingOut);
+        ViewHistoryCommand = new AsyncRelayCommand(ViewHistoryAsync, () => SelectedHistory != null && CanViewHistory);
+        SignOutCommand = new AsyncRelayCommand(SignOutAsync, () => !stopping && !signingOut);
         InitializeRecipeCommands();
         InitializeBatchCommands();
         InitializePlcCommands();
@@ -100,6 +105,8 @@ public sealed partial class StationViewModel : ObservableObject, IAsyncDisposabl
     public string StationId => options.StationId;
     public string DatabasePath => options.DatabasePath;
     public string ServerAddress => options.ServerUrl.ToString();
+    public string SessionButtonText => currentOperator is null ? "登录人员" : "退出 / 换班";
+    private bool CanViewHistory => archiveReady && !stopping && !signingOut && !plcInspecting && !RunCommand.IsRunning && !ViewHistoryCommand.IsRunning;
     public string OperatorName => currentOperator?.DisplayName ?? "未登录";
     public bool CanEdit => !stopping && !signingOut && !sessionExpired && currentOperator != null && ready && !plcInspecting && !plcWaitingAck && !RunCommand.IsRunning && !ViewHistoryCommand.IsRunning && !IsRecipeBusy && !IsBatchBusy;
     public ObservableCollection<ReplaySample> Samples { get; } = [];
@@ -156,16 +163,10 @@ public sealed partial class StationViewModel : ObservableObject, IAsyncDisposabl
         try
         {
             await Task.Run(store.Initialize);
+            if (currentOperator is not null && !resumeBatch) coordinator.EndOperatorSession();
+            await Task.Run(recipeStore.Initialize);
             var recovered = await Task.Run(coordinator.RecoverInterrupted);
             if (recovered > 0) AddEvent($"已恢复 {recovered} 条中断档案，未重新采图。");
-            var lines = await File.ReadAllLinesAsync(options.ManifestPath);
-            var json = new JsonSerializerOptions(JsonSerializerDefaults.Web);
-            foreach (var line in lines.Where(l => !string.IsNullOrWhiteSpace(l)))
-                replaySamples.Add(JsonSerializer.Deserialize<ReplaySample>(line, json) ?? throw new InvalidDataException("回放清单包含空记录。"));
-            foreach (var sample in replaySamples) Samples.Add(sample);
-            SelectedSample = Samples.FirstOrDefault();
-            await InitializeRecipesAsync();
-            await InitializeCachedBatchAsync();
             var pendingPlc = await Task.Run(store.ReadUnacknowledgedPlc);
             if (pendingPlc is not null)
             {
@@ -174,38 +175,59 @@ public sealed partial class StationViewModel : ObservableObject, IAsyncDisposabl
                 PlcStatus = "已恢复未确认检测，请连接 PLC 完成原件握手";
             }
             await RefreshHistoryAsync();
-            if (stopping) return;
-            try
-            {
-                var credentials = JsonSerializer.Deserialize<StationCredentials>(await File.ReadAllTextAsync(options.CredentialsPath), json);
-                if (credentials is null || string.IsNullOrWhiteSpace(credentials.UserName) || string.IsNullOrWhiteSpace(credentials.Password))
-                    throw new InvalidDataException("设备账号和密码不能为空。");
-                uploader = new InspectionUploader(store, uploadClient, credentials);
-                batchClient = new StationBatchClient(batchDeviceClient, credentials, StationId);
-            }
-            catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or InvalidDataException)
-            {
-                UploadStatus = "设备凭据不可用";
-                UploadNotice = $"无法读取有效的设备账号。修正 {options.CredentialsPath} 后重启工位；待上传原件保留。";
-                AddEvent(UploadNotice);
-            }
-            if (stopping) return;
-            ready = true;
-            Status = "准备就绪";
-            Notice = activeBatch is null ? "选择输入并开始检测。当前为工程回放，不计入生产批次。" : BatchStateText;
-            AddEvent($"工位已启动，载入 {Samples.Count} 个回放输入。");
-            if (uploader != null) uploadTask = UploadLoopAsync(uploadCancellation.Token);
+            archiveReady = true;
         }
         catch (Exception error)
         {
-            Status = "启动失败";
+            Status = "本地档案恢复失败";
             Notice = error.Message;
-            AddEvent("启动失败：" + error.Message);
+            AddEvent(Notice);
+            NotifyAccessChanged();
+            return;
         }
-        OnPropertyChanged(nameof(CanEdit));
-        RunCommand.NotifyCanExecuteChanged();
-        NotifyRecipeCommands();
-        NotifyBatchCommands();
+
+        // Stored results, PLC confirmation and device upload do not require a new
+        // personnel login, image manifest or a usable detector for new products.
+        try
+        {
+            var credentials = JsonSerializer.Deserialize<StationCredentials>(await File.ReadAllTextAsync(options.CredentialsPath), new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            if (credentials is null || string.IsNullOrWhiteSpace(credentials.UserName) || string.IsNullOrWhiteSpace(credentials.Password))
+                throw new InvalidDataException("设备账号和密码不能为空。");
+            uploader = new InspectionUploader(store, uploadClient, credentials);
+            batchClient = new StationBatchClient(batchDeviceClient, credentials, StationId);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or InvalidDataException)
+        {
+            UploadStatus = "设备凭据不可用";
+            UploadNotice = $"无法读取有效的设备账号。修正 {options.CredentialsPath} 后重启工位；待上传原件保留。";
+            AddEvent(UploadNotice);
+        }
+        if (stopping) return;
+        if (uploader != null) uploadTask = UploadLoopAsync(uploadCancellation.Token);
+        try
+        {
+            var json = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+            var lines = await File.ReadAllLinesAsync(options.ManifestPath);
+            foreach (var line in lines.Where(line => !string.IsNullOrWhiteSpace(line)))
+                replaySamples.Add(JsonSerializer.Deserialize<ReplaySample>(line, json) ?? throw new InvalidDataException("回放清单包含空记录。"));
+            foreach (var sample in replaySamples) Samples.Add(sample);
+            SelectedSample = Samples.FirstOrDefault();
+            await InitializeRecipesAsync();
+            await InitializeCachedBatchAsync();
+            if (stopping) return;
+            ready = true;
+            Status = currentOperator is null ? "本地档案与设备恢复" : "准备就绪";
+            Notice = currentOperator is null ? "可查看已存档案、补传并确认原 PLC 结果；生产需要人员批次授权。"
+                : activeBatch is null ? "选择输入并开始检测。当前为工程回放，不计入生产批次。" : BatchStateText;
+            AddEvent($"工位已启动，载入 {Samples.Count} 个回放输入。");
+        }
+        catch (Exception error)
+        {
+            Status = "新检测尚未就绪";
+            Notice = "本地档案和 PLC 原结果恢复可用。" + error.Message;
+            AddEvent(Notice);
+        }
+        NotifyAccessChanged();
         StartPlcCommand.NotifyCanExecuteChanged();
     }
 
@@ -318,20 +340,35 @@ public sealed partial class StationViewModel : ObservableObject, IAsyncDisposabl
 
     public ValueTask DisposeAsync() => new(shutdownTask ??= ShutdownAsync());
 
-    public void SignIn(CurrentUser user, HttpClient client)
+    public void SignIn(CurrentUser? user, StationPersonnelSession? personnel, bool restoreBatch)
     {
         if (stopping || signingOut || currentOperator != null) throw new InvalidOperationException("工位当前不能切换登录。");
-        currentOperator = StationAuthentication.RequireOperator(user);
-        operatorClient = client;
+        if (user is not null)
+        {
+            StationAuthentication.RequireOperator(user);
+            ArgumentNullException.ThrowIfNull(personnel);
+            if (!restoreBatch && !ClearLocalOperatorSession())
+                throw new InvalidOperationException("本地人员会话无法清除，请检查存储后重启。");
+        }
+        var cached = store.ReadActiveBatch();
+        currentOperator = user;
+        personnelSession = personnel;
+        activeBatch = cached;
+        UpdateBatchDisplay();
         sessionExpired = false;
-        Status = coordinator.IsFaulted ? "工位故障 · 已停止接件" : "准备就绪";
-        Notice = coordinator.IsFaulted ? "检查本地存储后重启工位。" : activeBatch is null ? "人员已登录，可以开始工程回放。" : "人员已登录，请在线启动当前批次。";
-        AddEvent($"操作员 {user.DisplayName} 已登录。");
+        Status = coordinator.IsFaulted ? "工位故障 · 已停止接件" : !ready ? "新检测尚未就绪"
+            : user is null ? "本地档案与设备恢复" : "准备就绪";
+        Notice = coordinator.IsFaulted ? "检查本地存储后重启工位。"
+            : user is null ? "可查看已存档案、补传并确认原 PLC 结果；生产需要人员批次授权。"
+            : !ready ? "请修复输入与固定方案后重启工位，原档案和设备恢复可用。"
+            : activeBatch is null ? "人员已登录，可以开始工程回放。" : BatchStateText;
+        AddEvent(user is null ? "已打开本地档案与设备恢复。" : $"操作员 {user.DisplayName} 已登录。");
         NotifyAccessChanged();
     }
 
     private async Task SignOutAsync()
     {
+        if (currentOperator is null) { LoginRequested?.Invoke(this, EventArgs.Empty); return; }
         signingOut = true;
         NotifyAccessChanged();
         Notice = "正在换班，等待已接受的操作保存完成…";
@@ -364,8 +401,8 @@ public sealed partial class StationViewModel : ObservableObject, IAsyncDisposabl
         }
         finally
         {
-            operatorClient?.Dispose();
-            operatorClient = null;
+            personnelSession?.Dispose();
+            personnelSession = null;
             currentOperator = null;
             signingOut = false;
             sessionExpired = false;
@@ -384,6 +421,7 @@ public sealed partial class StationViewModel : ObservableObject, IAsyncDisposabl
     private void NotifyAccessChanged()
     {
         OnPropertyChanged(nameof(OperatorName));
+        OnPropertyChanged(nameof(SessionButtonText));
         OnPropertyChanged(nameof(CanEdit));
         RunCommand.NotifyCanExecuteChanged();
         ViewHistoryCommand.NotifyCanExecuteChanged();
@@ -414,7 +452,7 @@ public sealed partial class StationViewModel : ObservableObject, IAsyncDisposabl
         {
             uploadClient.Dispose();
             batchDeviceClient.Dispose();
-            operatorClient?.Dispose();
+            personnelSession?.Dispose();
             uploadCancellation.Dispose();
             historyRefresh.Dispose();
         }
@@ -422,7 +460,7 @@ public sealed partial class StationViewModel : ObservableObject, IAsyncDisposabl
 
     private async Task ViewHistoryAsync()
     {
-        if (stopping || signingOut || sessionExpired || currentOperator is null) return;
+        if (stopping || signingOut || !archiveReady || plcInspecting || RunCommand.IsRunning) return;
         var id = SelectedHistory!.Id;
         try
         {

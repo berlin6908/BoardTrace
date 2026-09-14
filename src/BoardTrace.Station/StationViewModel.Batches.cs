@@ -94,9 +94,6 @@ public sealed partial class StationViewModel
     {
         var cached = await Task.Run(store.ReadActiveBatch);
         if (cached is null) return;
-        // Startup currently performs an online personnel login. A new process must start
-        // its own operator session; offline cold-start recovery belongs to the recovery flow.
-        coordinator.EndOperatorSession();
         var recipe = await Task.Run(() => recipeStore.Load(cached.Batch.RecipeVersionId));
         coordinator.RestoreCachedBatchRecipe(recipe);
         loadedRecipe = recipe;
@@ -186,7 +183,8 @@ public sealed partial class StationViewModel
             var session = await response.Content.ReadFromJsonAsync<BatchExecutionSession>(uploadCancellation.Token)
                 ?? throw new InvalidDataException("中央未返回生产授权。");
             if (session.OperatorId != currentOperator!.Id) throw new UnauthorizedAccessException("启动授权未对应当前操作员，请重新登录。");
-            coordinator.StartBatch(session);
+            var protectedResume = OfflineBatchResume.Protect(options, currentOperator, personnelSession!, session);
+            coordinator.StartBatch(session, protectedResume);
             await RefreshBatchStateAsync();
             BatchNotice = BatchStateText;
             AddEvent($"操作员 {OperatorName} 在线启动批次 {ActiveBatchNumber}。");

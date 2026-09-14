@@ -13,31 +13,38 @@ public partial class App : Application
         try
         {
             var options = StationOptions.Parse(e.Args);
-            var operatorClient = StationAuthentication.CreateClient(options.ServerUrl);
-            var login = new LoginWindow(operatorClient, options.StationId);
+            var login = new LoginWindow(StationAuthentication.CreatePersonnelSession(options.ServerUrl), options);
             if (login.ShowDialog() != true)
             {
-                operatorClient.Dispose();
+                login.PersonnelSession?.Dispose();
                 Shutdown();
                 return;
             }
-            var viewModel = new StationViewModel(options, login.AuthenticatedUser!, operatorClient);
+            var viewModel = new StationViewModel(options, login.AuthenticatedUser, login.PersonnelSession, login.ResumeBatch);
             var window = new MainWindow { DataContext = viewModel };
             window.Closed += (_, _) => Shutdown();
             viewModel.LoginRequested += (_, _) =>
             {
                 window.Hide();
-                var nextClient = StationAuthentication.CreateClient(options.ServerUrl);
-                var nextLogin = new LoginWindow(nextClient, options.StationId);
-                if (nextLogin.ShowDialog() == true)
+                var nextLogin = new LoginWindow(StationAuthentication.CreatePersonnelSession(options.ServerUrl), options);
+                try
                 {
-                    viewModel.SignIn(nextLogin.AuthenticatedUser!, nextClient);
-                    window.Show();
+                    if (nextLogin.ShowDialog() == true)
+                    {
+                        viewModel.SignIn(nextLogin.AuthenticatedUser, nextLogin.PersonnelSession, nextLogin.ResumeBatch);
+                        window.Show();
+                    }
+                    else
+                    {
+                        nextLogin.PersonnelSession?.Dispose();
+                        window.Close();
+                    }
                 }
-                else
+                catch (Exception error)
                 {
-                    nextClient.Dispose();
-                    window.Close();
+                    nextLogin.PersonnelSession?.Dispose();
+                    window.Show();
+                    MessageBox.Show(window, error.Message, "人员登录未完成", MessageBoxButton.OK, MessageBoxImage.Error);
                 }
             };
             window.Width = Math.Min(window.Width, SystemParameters.WorkArea.Width - 32);

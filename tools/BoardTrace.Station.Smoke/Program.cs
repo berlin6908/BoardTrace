@@ -29,8 +29,8 @@ public static partial class Program
         var arguments = new Dictionary<string, string>();
         for (var index = 0; index < args.Length; index += 2)
         {
-            if (index + 1 >= args.Length || args[index] is not ("--server" or "--station" or "--credentials" or "--development-accounts" or "--scope"))
-                throw new ArgumentException("Supported options: --server, --station, --credentials, --development-accounts, --scope.");
+            if (index + 1 >= args.Length || args[index] is not ("--server" or "--station" or "--credentials" or "--development-accounts" or "--scope" or "--context"))
+                throw new ArgumentException("Supported options: --server, --station, --credentials, --development-accounts, --scope, --context.");
             arguments.Add(args[index], args[index + 1]);
         }
         var output = Path.GetFullPath($"artifacts/station/{DateTime.UtcNow:yyyyMMdd-HHmmss}");
@@ -78,10 +78,22 @@ public static partial class Program
             await VerifyPlcUiAsync(output);
             return;
         }
-        if (arguments.ContainsKey("--scope")) throw new ArgumentException("--scope supports plc or omission for the full smoke flow.");
-        using (var previewClient = StationAuthentication.CreateClient(new Uri("http://127.0.0.1:1/")))
+        if (arguments.GetValueOrDefault("--scope") == "offline")
         {
-            var preview = new LoginWindow(previewClient, "STATION-01");
+            await VerifyOfflineBatchAsync(output);
+            return;
+        }
+        if (arguments.GetValueOrDefault("--scope") == "offline-resume-child")
+        {
+            await VerifyOfflineResumeChildAsync(arguments["--context"]);
+            return;
+        }
+        if (arguments.ContainsKey("--scope")) throw new ArgumentException("--scope supports plc, offline, offline-resume-child or omission for the full smoke flow.");
+        using (var previewClient = StationAuthentication.CreatePersonnelSession(new Uri("http://127.0.0.1:1/")))
+        {
+            var preview = new LoginWindow(previewClient, new StationOptions("STATION-01", Path.GetFullPath("data"),
+                Path.GetFullPath("training/manifests/inputs/validation.jsonl"), Path.Combine(output, "preview.db"),
+                new Uri("http://127.0.0.1:1/"), Path.Combine(output, "preview-device.json")));
             preview.Show();
             await SnapshotAsync(preview, Path.Combine(output, "00-operator-login.png"));
             preview.Close();
@@ -183,11 +195,12 @@ public static partial class Program
     private static async Task VerifyUploadedHistoryAsync(string output, StationOptions defaults, string developmentAccounts)
     {
         var options = defaults with { DatabasePath = Path.Combine(output, "central-sync.db") };
-        using var operatorClient = StationAuthentication.CreateClient(options.ServerUrl);
+        using var operatorSession = StationAuthentication.CreatePersonnelSession(options.ServerUrl);
+        var operatorClient = operatorSession.Client;
         var passwords = JsonSerializer.Deserialize<Dictionary<string, string>>(await File.ReadAllTextAsync(developmentAccounts))
             ?? throw new InvalidDataException("No development operator login was found.");
         var request = new LoginRequest("operator", passwords["operator"]);
-        var login = new LoginWindow(operatorClient, options.StationId);
+        var login = new LoginWindow(operatorSession, options);
         var loginTimeout = new DispatcherTimer { Interval = TimeSpan.FromSeconds(20) };
         loginTimeout.Tick += (_, _) => login.Close();
         _ = login.Dispatcher.InvokeAsync(async () =>
@@ -203,7 +216,7 @@ public static partial class Program
         Require(loggedIn == true && login.AuthenticatedUser != null && ((PasswordBox)login.FindName("PasswordInput")).Password.Length == 0,
             "Actual operator login failed or PasswordBox was not cleared.");
         var user = login.AuthenticatedUser!;
-        await using var model = new StationViewModel(options, user, operatorClient);
+        await using var model = new StationViewModel(options, user, login.PersonnelSession, login.ResumeBatch);
         var window = new MainWindow { DataContext = model };
         window.Show();
         await model.InitializeAsync();
@@ -299,7 +312,7 @@ public static partial class Program
     {
         var options = defaults with { DatabasePath = Path.Combine(output, "session-shift.db") };
         var expired = new OperatorHandler(OfflineOperator) { MeStatus = HttpStatusCode.Unauthorized };
-        await using var model = new StationViewModel(options, OfflineOperator, PersonnelClient(expired));
+        await using var model = new StationViewModel(options, OfflineOperator, PersonnelSession(expired), false);
         var window = new MainWindow { DataContext = model };
         window.Show();
         await model.InitializeAsync();
@@ -313,7 +326,7 @@ public static partial class Program
 
         var nextOperator = OfflineOperator with { Id = "smoke-operator-two", DisplayName = "第二位测试操作员" };
         var nextHandler = new OperatorHandler(nextOperator) { Disconnected = true };
-        model.SignIn(nextOperator, PersonnelClient(nextHandler));
+        model.SignIn(nextOperator, PersonnelSession(nextHandler), false);
         await model.RunCommand.ExecuteAsync(null);
         Require(store.ReadRecent().Count == 0, "Personnel authentication network failure left a Started record behind.");
         nextHandler.Disconnected = false;
@@ -340,7 +353,7 @@ public static partial class Program
             await signingOut;
             Require(inspection.IsCompletedSuccessfully && store.ReadRecent().Count == 2, "Shift change lost an accepted inspection.");
         }
-        model.SignIn(OfflineOperator, OfflineOperatorClient(OfflineOperator));
+        model.SignIn(OfflineOperator, OfflineOperatorSession(OfflineOperator), false);
         model.ProductId = "SIM-AFTER-SHIFT";
         await model.RunCommand.ExecuteAsync(null);
         Require(store.Get(beforeShiftId)!.OperatorId == nextOperator.Id && store.Get(Guid.Parse(model.InspectionId))!.OperatorId == OfflineOperator.Id,
@@ -460,10 +473,11 @@ public static partial class Program
         if (!condition) throw new InvalidOperationException(message);
     }
 
-    private static StationViewModel OfflineModel(StationOptions options) => new(options, OfflineOperator, OfflineOperatorClient(OfflineOperator));
+    private static StationViewModel OfflineModel(StationOptions options) => new(options, OfflineOperator, OfflineOperatorSession(OfflineOperator), false);
 
-    private static HttpClient OfflineOperatorClient(CurrentUser user) => PersonnelClient(new OperatorHandler(user));
+    private static StationPersonnelSession OfflineOperatorSession(CurrentUser user) => PersonnelSession(new OperatorHandler(user));
     private static HttpClient PersonnelClient(HttpMessageHandler handler) => new(handler) { BaseAddress = new Uri("http://offline-personnel-test/") };
+    private static StationPersonnelSession PersonnelSession(HttpMessageHandler handler) => new(PersonnelClient(handler), new CookieContainer());
 
     // Explicit personnel fixture for local image/storage rendering tests. Actual App and live smoke use the login endpoint.
     private sealed class OperatorHandler(CurrentUser user) : HttpMessageHandler

@@ -27,7 +27,7 @@ public sealed partial class StationViewModel
 
     private void InitializePlcCommands()
     {
-        StartPlcCommand = new RelayCommand(StartPlc, () => !plcRunning && ready && !stopping && !signingOut
+        StartPlcCommand = new RelayCommand(StartPlc, () => !plcRunning && archiveReady && !stopping && !signingOut
             && !RunCommand.IsRunning && !IsRecipeBusy && !IsBatchBusy && !string.IsNullOrWhiteSpace(PlcHost)
             && int.TryParse(PlcPort, out var port) && port is >= 1 and <= 65535);
         StopPlcCommand = new AsyncRelayCommand(StopPlcAsync, () => plcRunning);

@@ -1,4 +1,5 @@
 using System.Data.Common;
+using System.Diagnostics;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text.Json;
@@ -16,10 +17,11 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using OpenCvSharp;
 using LogLevel = Microsoft.Extensions.Logging.LogLevel;
+using Xunit.Abstractions;
 
 namespace BoardTrace.Server.Tests;
 
-public sealed class RecipeWorkerRecoveryTests
+public sealed class RecipeWorkerRecoveryTests(ITestOutputHelper output)
 {
     [Theory]
     [InlineData("idle")]
@@ -28,7 +30,7 @@ public sealed class RecipeWorkerRecoveryTests
     [InlineData("completion")]
     public async Task DatabaseInterruptionKeepsHostAliveAndResumesOnlyNewWork(string interruption)
     {
-        await using var server = await RecoveryServer.CreateAsync(interruption);
+        await using var server = await RecoveryServer.CreateAsync(interruption, output);
         await server.Fault.Reached.Task.WaitAsync(TimeSpan.FromSeconds(15));
         await server.SetOnline(false);
         server.Fault.Release.TrySetResult();
@@ -82,7 +84,7 @@ public sealed class RecipeWorkerRecoveryTests
     [Fact]
     public async Task HostCanStopWhileWorkerWaitsForDatabaseRecovery()
     {
-        await using var server = await RecoveryServer.CreateAsync("idle");
+        await using var server = await RecoveryServer.CreateAsync("idle", output);
         await server.Fault.Reached.Task.WaitAsync(TimeSpan.FromSeconds(15));
         await server.SetOnline(false);
         server.Fault.Release.TrySetResult();
@@ -170,6 +172,7 @@ public sealed class RecipeWorkerRecoveryTests
 
     private sealed class RecoveryServer : IAsyncDisposable
     {
+        private ITestOutputHelper output = null!;
         private const string Prefix = "BoardTrace_WorkerRecovery_";
         private const string Master = "Server=(localdb)\\BoardTrace;Database=master;Integrated Security=true;TrustServerCertificate=true";
         private readonly string database = Prefix + Guid.NewGuid().ToString("N");
@@ -189,9 +192,9 @@ public sealed class RecipeWorkerRecoveryTests
             .UseSqlServer(new SqlConnectionStringBuilder(Connection) { Pooling = false }.ConnectionString,
                 options => options.CommandTimeout(2)).Options);
 
-        public static async Task<RecoveryServer> CreateAsync(string interruption)
+        public static async Task<RecoveryServer> CreateAsync(string interruption, ITestOutputHelper output)
         {
-            var server = new RecoveryServer { Fault = new FaultPoint(interruption) };
+            var server = new RecoveryServer { Fault = new FaultPoint(interruption), output = output };
             await server.Sql($"CREATE DATABASE [{server.database}]");
             try
             {
@@ -241,11 +244,28 @@ public sealed class RecipeWorkerRecoveryTests
         public async Task<ValidationRun> WaitForFinished(Guid id)
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+            var elapsed = Stopwatch.StartNew();
+            var sqlTimeouts = 0;
             while (true)
             {
-                await using var db = Context();
-                var run = await db.ValidationRuns.AsNoTracking().SingleAsync(row => row.Id == id, timeout.Token);
-                if (run.Status is "Completed" or "Failed") return run;
+                try
+                {
+                    await using var db = Context();
+                    var run = await db.ValidationRuns.AsNoTracking().SingleAsync(row => row.Id == id, timeout.Token);
+                    if (run.Status is "Completed" or "Failed")
+                    {
+                        output.WriteLine($"WaitForFinished {id}: status={run.Status}, SQL timeouts={sqlTimeouts}, elapsed={elapsed.Elapsed.TotalSeconds:F2}s");
+                        return run;
+                    }
+                }
+                // ALTER DATABASE ONLINE can return before LocalDB is ready to
+                // complete a fresh login/query. The observer must wait for the
+                // same database to become readable; worker state is still checked.
+                catch (SqlException error) when (error.Number == -2 && !timeout.IsCancellationRequested)
+                {
+                    sqlTimeouts++;
+                    output.WriteLine($"WaitForFinished {id}: SQL timeout -2 at {DateTimeOffset.UtcNow:O}, elapsed={elapsed.Elapsed.TotalSeconds:F2}s");
+                }
                 await Task.Delay(100, timeout.Token);
             }
         }

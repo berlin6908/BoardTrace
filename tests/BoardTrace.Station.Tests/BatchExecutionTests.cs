@@ -81,7 +81,7 @@ public sealed class BatchExecutionTests
             batch.StationId, "NO-SESSION", Operator, Source(f)));
         Assert.Equal(1, f.Store.PendingCount());
         var session = Session(batch, approval, Operator);
-        coordinator.StartBatch(session);
+        coordinator.StartBatch(session, null);
         var first = await coordinator.InspectAsync(InspectionPurpose.Production, batch.StationId, "PROD-1", Operator, Source(f));
         Assert.Equal(1, first.ProductionSequence);
         Assert.Equal(session.Id, first.ExecutionSessionId);
@@ -116,8 +116,8 @@ public sealed class BatchExecutionTests
         var (f, batch, coordinator) = Setup();
         var approval = await ApproveFixtureAsync(f, batch, coordinator);
         Assert.Throws<InspectionRejectedException>(() => coordinator.StartBatch(Session(batch, approval, Operator,
-            DateTimeOffset.UtcNow.AddHours(-2), DateTimeOffset.UtcNow.AddHours(-1))));
-        coordinator.StartBatch(Session(batch, approval, Operator));
+            DateTimeOffset.UtcNow.AddHours(-2), DateTimeOffset.UtcNow.AddHours(-1)), null));
+        coordinator.StartBatch(Session(batch, approval, Operator), null);
         await Assert.ThrowsAsync<InspectionRejectedException>(() => coordinator.InspectAsync(InspectionPurpose.Production,
             batch.StationId, "WRONG-OPERATOR", Other, Source(f)));
         Assert.Throws<InspectionRejectedException>(() => coordinator.UseDevelopmentRecipe(new ClassicalSettings()));
@@ -138,7 +138,7 @@ public sealed class BatchExecutionTests
     {
         var (f, batch, coordinator) = Setup();
         var approval = await ApproveFixtureAsync(f, batch, coordinator);
-        coordinator.StartBatch(Session(batch, approval, Operator));
+        coordinator.StartBatch(Session(batch, approval, Operator), null);
         using (var connection = new SqliteConnection($"Data Source={f.Store.DatabasePath}"))
         {
             connection.Open();
@@ -160,14 +160,14 @@ public sealed class BatchExecutionTests
     {
         var (f, batch, coordinator) = Setup();
         var approval = await ApproveFixtureAsync(f, batch, coordinator);
-        coordinator.StartBatch(Session(batch, approval, Operator, expires: DateTimeOffset.UtcNow.AddMilliseconds(500)));
+        coordinator.StartBatch(Session(batch, approval, Operator, expires: DateTimeOffset.UtcNow.AddMilliseconds(500)), null);
         await Task.Delay(700);
         await Assert.ThrowsAsync<InspectionRejectedException>(() => coordinator.InspectAsync(InspectionPurpose.Production,
             batch.StationId, "EXPIRED", Operator, Source(f)));
         Assert.Equal(1, f.Store.ReadActiveBatch()!.NextProductionSequence);
         Assert.Single(f.Store.ReadRecent());
         Assert.False(coordinator.IsFaulted);
-        coordinator.StartBatch(Session(batch, approval, Operator));
+        coordinator.StartBatch(Session(batch, approval, Operator), null);
         var accepted = await coordinator.InspectAsync(InspectionPurpose.Production, batch.StationId, "RESTARTED", Operator, Source(f));
         Assert.Equal(1, accepted.ProductionSequence);
         Assert.Equal(2, f.Store.PendingCount());
@@ -179,7 +179,7 @@ public sealed class BatchExecutionTests
         var (f, batch, coordinator) = Setup();
         var approval = await ApproveFixtureAsync(f, batch, coordinator);
         var session = Session(batch, approval, Operator);
-        coordinator.StartBatch(session);
+        coordinator.StartBatch(session, null);
         using (var connection = new SqliteConnection($"Data Source={f.Store.DatabasePath}"))
         {
             connection.Open();
@@ -195,5 +195,140 @@ public sealed class BatchExecutionTests
         Assert.Single(f.Store.ReadRecent());
         Assert.Equal(1, f.Store.ReadActiveBatch()!.NextProductionSequence);
         Assert.Throws<InvalidOperationException>(() => coordinator.UseDevelopmentRecipe(new ClassicalSettings()));
+    }
+
+    [Fact]
+    public async Task ResumePayloadReloadsWithItsSessionAndNullExplicitlyRemovesPreviousPayload()
+    {
+        var (f, batch, coordinator) = Setup();
+        var approval = await ApproveFixtureAsync(f, batch, coordinator);
+        var session = Session(batch, approval, Operator);
+        byte[] protectedBytes = [2, 4, 6, 8];
+        coordinator.StartBatch(session, protectedBytes);
+        protectedBytes[0] = 99;
+        var reopened = new LocalInspectionStore(f.Store.DatabasePath);
+        var resume = reopened.ReadBatchResume()!;
+        Assert.Equal(session, resume.Batch.Session);
+        Assert.Equal(BatchStatus.InProgress, resume.Batch.Status);
+        Assert.Equal(new byte[] { 2, 4, 6, 8 }, resume.ProtectedPayload);
+        coordinator.UseBatch(Package(f, batch, BatchStatus.InProgress, approval), f.Loaded);
+        Assert.Equal(session, reopened.ReadBatchResume()!.Batch.Session);
+        var replacement = Session(batch, approval, Operator);
+        coordinator.StartBatch(replacement, null);
+        Assert.Null(reopened.ReadBatchResume());
+        Assert.Equal(0, ResumeRowCount(reopened));
+        Assert.Equal(replacement, reopened.ReadActiveBatch()!.Session);
+        Assert.Single(reopened.ReadRecent());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ResumeWriteFailureRollsBackSessionStatusAndPayload(bool existingSession)
+    {
+        var (f, batch, coordinator) = Setup();
+        var approval = await ApproveFixtureAsync(f, batch, coordinator);
+        var previous = Session(batch, approval, Operator);
+        if (existingSession) coordinator.StartBatch(previous, [1, 2, 3]);
+        Sql(f.Store, "CREATE TRIGGER reject_resume BEFORE INSERT ON OfflineBatchResume BEGIN SELECT RAISE(ABORT,'resume fixture failure'); END;");
+        Assert.Throws<SqliteException>(() => coordinator.StartBatch(Session(batch, approval, Operator), [9, 8]));
+        Assert.True(coordinator.IsFaulted);
+        var batchAfter = f.Store.ReadActiveBatch()!;
+        Assert.Equal(existingSession ? BatchStatus.InProgress : BatchStatus.Approved, batchAfter.Status);
+        Assert.Equal(existingSession ? previous : null, batchAfter.Session);
+        if (existingSession) Assert.Equal(new byte[] { 1, 2, 3 }, f.Store.ReadBatchResume()!.ProtectedPayload);
+        else Assert.Null(f.Store.ReadBatchResume());
+        Assert.Single(f.Store.ReadRecent());
+    }
+
+    [Fact]
+    public async Task ResumeDeleteFailureRollsBackSessionClearThenSuccessfulClearRemovesBoth()
+    {
+        var (f, batch, coordinator) = Setup();
+        var approval = await ApproveFixtureAsync(f, batch, coordinator);
+        var session = Session(batch, approval, Operator);
+        coordinator.StartBatch(session, [7, 6]);
+        Sql(f.Store, "CREATE TRIGGER reject_resume_delete BEFORE DELETE ON OfflineBatchResume BEGIN SELECT RAISE(ABORT,'resume delete failure'); END;");
+        Assert.Throws<SqliteException>(() => coordinator.EndOperatorSession());
+        Assert.True(coordinator.IsFaulted);
+        Assert.Equal(session, f.Store.ReadActiveBatch()!.Session);
+        Assert.Equal(new byte[] { 7, 6 }, f.Store.ReadBatchResume()!.ProtectedPayload);
+        Sql(f.Store, "DROP TRIGGER reject_resume_delete;");
+        f.Store.ClearExecutionSession();
+        Assert.Null(f.Store.ReadActiveBatch()!.Session);
+        Assert.Null(f.Store.ReadBatchResume());
+        Assert.Equal(0, ResumeRowCount(f.Store));
+        Assert.Single(f.Store.ReadRecent());
+        Assert.Equal(1, f.Store.PendingCount());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task LeavingOrSelectingAnotherBatchClearsTheOldResumePayload(bool selectAnother)
+    {
+        var (f, batch, coordinator) = Setup();
+        var approval = await ApproveFixtureAsync(f, batch, coordinator);
+        coordinator.StartBatch(Session(batch, approval, Operator), [5]);
+        // This test supplies the terminal batch state; closing workflow is a separate feature.
+        Sql(f.Store, "UPDATE CachedBatches SET Status='Closed';");
+        if (selectAnother)
+        {
+            var next = batch with { Id = Guid.NewGuid(), BatchNumber = "NEXT-BATCH" };
+            coordinator.UseBatch(Package(f, next, BatchStatus.AwaitingFirstArticle), f.Loaded);
+            Assert.Equal(next.Id, f.Store.ReadActiveBatch()!.Batch.Id);
+            Assert.Null(f.Store.ReadActiveBatch()!.Session);
+        }
+        else
+        {
+            coordinator.UseDevelopmentRecipe(new ClassicalSettings());
+            Assert.Null(f.Store.ReadActiveBatch());
+        }
+        Assert.Null(f.Store.ReadBatchResume());
+        Assert.Equal(0, ResumeRowCount(f.Store));
+        Assert.Single(f.Store.ReadRecent());
+    }
+
+    [Fact]
+    public async Task ClearingResumeAuthorizationDoesNotRemoveHeldPlcResultOrItsDuplicateIdentity()
+    {
+        var (f, batch, coordinator) = Setup();
+        var approval = await ApproveFixtureAsync(f, batch, coordinator);
+        coordinator.StartBatch(Session(batch, approval, Operator), [4, 3]);
+        var identity = new InspectionIdentity(Guid.NewGuid(), 1);
+        var result = await coordinator.InspectAsync(InspectionPurpose.Production, batch.StationId, "PLC-RESUME",
+            Operator, Source(f), identity: identity);
+        var hash = InspectionTransfer.Hash(result);
+        coordinator.EndOperatorSession();
+        Assert.Null(f.Store.ReadBatchResume());
+        Assert.Null(f.Store.ReadActiveBatch()!.Session);
+        Assert.Equal(result.Id, f.Store.ReadUnacknowledgedPlc()!.Record.Id);
+        File.Delete(Path.Combine(f.Folder, "tested.png"));
+        var repeated = await coordinator.InspectAsync(InspectionPurpose.Production, batch.StationId, "PLC-RESUME",
+            Operator, Source(f), identity: identity);
+        Assert.Equal(result.Id, repeated.Id);
+        coordinator.ConfirmPlcAck(result.Id);
+        Assert.Null(f.Store.ReadUnacknowledgedPlc());
+        Assert.Equal(hash, InspectionTransfer.Hash(f.Store.Get(result.Id)!));
+        Assert.Equal(2, f.Store.ReadActiveBatch()!.NextProductionSequence);
+        Assert.Equal(2, f.Store.PendingCount());
+    }
+
+    private static void Sql(LocalInspectionStore store, string sql)
+    {
+        using var connection = new SqliteConnection($"Data Source={store.DatabasePath}");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.ExecuteNonQuery();
+    }
+
+    private static long ResumeRowCount(LocalInspectionStore store)
+    {
+        using var connection = new SqliteConnection($"Data Source={store.DatabasePath}");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM OfflineBatchResume;";
+        return (long)command.ExecuteScalar()!;
     }
 }
