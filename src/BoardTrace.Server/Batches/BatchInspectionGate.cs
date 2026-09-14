@@ -18,6 +18,7 @@ public static class BatchInspectionGate
         if (record.BatchId is null) return "首件、生产和复检必须绑定批次。";
         var batch = await db.Batches.AsNoTracking().SingleOrDefaultAsync(batch => batch.Id == record.BatchId, token);
         if (batch is null || batch.StationId != record.StationId) return "批次不存在或不属于该工位。";
+        if (batch.Status == BatchStatus.Closed) return "批次已经关闭，不能接收新检测编号；原编号同内容重发仍返回原回执。";
         if (record.RecipeId != batch.RecipeVersionId.ToString("D")) return "检测版本与批次固定版本不符。";
         PublishedRecipeVersion? snapshot;
         try { snapshot = JsonSerializer.Deserialize<PublishedRecipeVersion>(record.RecipeJson, Json); }
@@ -36,7 +37,7 @@ public static class BatchInspectionGate
             if (approval is null && batch.Status != BatchStatus.AwaitingFirstArticle) return "批次当前状态不允许首次接收首件。";
             return approval is not null && record.StartedAt > approval.ApprovedAt ? "首件批准后不能再接受新的首件。" : null;
         }
-        if (batch.Status is not (BatchStatus.InProgress or BatchStatus.Closed)) return "批次尚未启动生产。";
+        if (batch.Status != BatchStatus.InProgress) return "批次尚未启动生产。";
         if (record.Purpose == InspectionPurpose.Production &&
             (record.ProductionSequence is not int sequence || sequence < 1 || sequence > batch.PlannedQuantity))
             return "生产序号超出本批计划数量。";

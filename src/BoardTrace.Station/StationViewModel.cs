@@ -199,6 +199,7 @@ public sealed partial class StationViewModel : ObservableObject, IAsyncDisposabl
             if (credentials is null || string.IsNullOrWhiteSpace(credentials.UserName) || string.IsNullOrWhiteSpace(credentials.Password))
                 throw new InvalidDataException("设备账号和密码不能为空。");
             uploader = new InspectionUploader(store, uploadClient, credentials);
+            runtimeClient = new StationRuntimeClient(uploadClient, credentials, StationId);
             batchClient = new StationBatchClient(batchDeviceClient, credentials, StationId);
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or InvalidDataException)
@@ -206,6 +207,8 @@ public sealed partial class StationViewModel : ObservableObject, IAsyncDisposabl
             UploadStatus = "设备凭据不可用";
             UploadNotice = $"无法读取有效的设备账号。修正 {options.CredentialsPath} 后重启工位；待上传原件保留。";
             AddEvent(UploadNotice);
+            RuntimeStatus = "设备凭据不可用";
+            RuntimeNotice = UploadNotice;
         }
         if (stopping) return;
         if (uploader != null) uploadTask = UploadLoopAsync(uploadCancellation.Token);
@@ -338,6 +341,7 @@ public sealed partial class StationViewModel : ObservableObject, IAsyncDisposabl
                     if (UploadNotice != nextNotice) AddEvent(nextNotice);
                     UploadNotice = nextNotice;
                 }
+                await ReportRuntimeAsync(cancellationToken);
                 await Task.Delay(delay, cancellationToken);
             }
         }

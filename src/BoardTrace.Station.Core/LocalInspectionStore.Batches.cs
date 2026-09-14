@@ -126,14 +126,16 @@ public sealed partial class LocalInspectionStore
         if (recipe.VersionId != batch.RecipeVersionId || recipe.BundleHash != batch.RecipeBundleHash ||
             package.Recipe.Bundle.VersionId != recipe.VersionId || package.Recipe.BundleHash != recipe.BundleHash)
             throw new InspectionRejectedException("批次与完整缓存方案版本不一致。");
-        if (batch.PlannedQuantity <= 0 || package.Status == BatchStatus.Closed)
-            throw new InspectionRejectedException("批次已关闭或计划数量无效，不能下发。");
+        if (batch.PlannedQuantity <= 0)
+            throw new InspectionRejectedException("批次计划数量无效，不能下发。");
         if (package.Approval is { } approval && approval.BatchId != batch.Id)
             throw new InspectionRejectedException("首件批准不属于该批次。");
         using var connection = Open();
         using var transaction = connection.BeginTransaction();
         RequireNoUnacknowledgedPlc(connection, transaction);
         var active = ReadActiveBatch(connection, transaction);
+        if (package.Status == BatchStatus.Closed && active?.Batch.Id != batch.Id)
+            throw new InspectionRejectedException("已关闭批次只能刷新当前本地批次，不能重新下发。");
         if (active is not null && active.Batch.Id != batch.Id && active.Status != BatchStatus.Closed)
             throw new InspectionRejectedException("当前工位已有未关闭批次，不能切换。");
         using var existing = connection.CreateCommand();
@@ -188,15 +190,17 @@ public sealed partial class LocalInspectionStore
         select.CommandText = """
             INSERT INTO ActiveBatch(Slot,BatchId) VALUES (1,$id)
             ON CONFLICT(Slot) DO UPDATE SET BatchId=excluded.BatchId,
-                ExecutionSession=CASE WHEN ActiveBatch.BatchId=excluded.BatchId THEN ActiveBatch.ExecutionSession ELSE NULL END;
+                ExecutionSession=CASE WHEN $closed=0 AND ActiveBatch.BatchId=excluded.BatchId THEN ActiveBatch.ExecutionSession ELSE NULL END;
             """;
         select.Parameters.AddWithValue("$id", batch.Id.ToString());
+        select.Parameters.AddWithValue("$closed", status == BatchStatus.Closed);
         select.ExecuteNonQuery();
-        if (active?.Batch.Id != batch.Id)
+        if (active?.Batch.Id != batch.Id || status == BatchStatus.Closed)
         {
             using var clear = connection.CreateCommand();
             clear.Transaction = transaction;
-            clear.CommandText = "DELETE FROM OfflineBatchResume WHERE Slot=1; DELETE FROM ActiveRework WHERE Slot=1;";
+            clear.CommandText = "DELETE FROM OfflineBatchResume WHERE Slot=1;";
+            if (active?.Batch.Id != batch.Id) clear.CommandText += " DELETE FROM ActiveRework WHERE Slot=1;";
             clear.ExecuteNonQuery();
         }
         transaction.Commit();

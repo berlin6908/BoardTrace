@@ -62,6 +62,7 @@ public sealed partial class LocalInspectionStore(string databasePath)
         InitializePlc(connection);
         InitializeImageRetention(connection);
         InitializeRework(connection);
+        InitializeRuntime(connection);
     }
 
     // Images live only in their BLOB columns, never duplicated as base64 in the document.

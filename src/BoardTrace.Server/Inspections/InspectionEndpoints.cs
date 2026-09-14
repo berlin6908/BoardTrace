@@ -38,6 +38,14 @@ public static class InspectionEndpoints
             return Results.Problem(statusCode: 400, title: "检测档案无效", detail: problem);
         if (await users.FindByIdAsync(record.OperatorId) is null)
             return Results.Problem(statusCode: 400, title: "操作员不存在");
+        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        if (record.BatchId is Guid batchId)
+        {
+            await db.Batches.Where(batch => batch.Id == batchId).ExecuteUpdateAsync(update =>
+                update.SetProperty(batch => batch.Status, batch => batch.Status), cancellationToken);
+            existing = await ReadReceiptAsync(db, id, cancellationToken);
+            if (existing is not null) return RepeatResult(existing, InspectionTransfer.Hash(record));
+        }
         if (await BatchInspectionGate.Check(record, db, cancellationToken) is string gate)
             return Results.Problem(statusCode: 409, title: gate);
         var hash = InspectionTransfer.Hash(record);
@@ -48,10 +56,12 @@ public static class InspectionEndpoints
         {
             // EF commits the header, every defect and both image BLOBs in one transaction.
             await db.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
             return Results.Created($"/api/inspections/{id}", inspection.Receipt());
         }
         catch (DbUpdateException error) when (error.InnerException is SqlException { Number: 2601 or 2627 })
         {
+            await transaction.RollbackAsync(cancellationToken);
             // A concurrent retry may commit after the initial lookup. The primary key is the final arbiter.
             db.ChangeTracker.Clear();
             existing = await ReadReceiptAsync(db, id, cancellationToken);

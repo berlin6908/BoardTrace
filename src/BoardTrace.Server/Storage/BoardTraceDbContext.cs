@@ -5,6 +5,7 @@ using BoardTrace.Server.Identity;
 using BoardTrace.Server.Recipes;
 using BoardTrace.Server.Batches;
 using BoardTrace.Contracts;
+using BoardTrace.Server.Stations;
 
 namespace BoardTrace.Server.Storage;
 
@@ -22,10 +23,21 @@ public sealed class BoardTraceDbContext(DbContextOptions<BoardTraceDbContext> op
     public DbSet<BatchExecutionSession> BatchExecutionSessions => Set<BatchExecutionSession>();
     public DbSet<InspectionReview> InspectionReviews => Set<InspectionReview>();
     public DbSet<ReworkOrder> ReworkOrders => Set<ReworkOrder>();
+    public DbSet<StationRuntimeState> StationRuntime => Set<StationRuntimeState>();
+    public DbSet<BatchClosureAudit> BatchClosures => Set<BatchClosureAudit>();
 
     protected override void OnModelCreating(ModelBuilder model)
     {
         base.OnModelCreating(model);
+        var runtime = model.Entity<StationRuntimeState>();
+        runtime.ToTable("StationRuntime").HasKey(row => row.StationId);
+        runtime.Property(row => row.StationId).HasMaxLength(128);
+        var closure = model.Entity<BatchClosureAudit>();
+        closure.ToTable("BatchClosures").HasKey(row => row.BatchId);
+        closure.Property(row => row.BatchId).ValueGeneratedNever();
+        closure.Property(row => row.ClosedById).HasMaxLength(450);
+        closure.Property(row => row.ClosedByName).HasMaxLength(128);
+        closure.HasOne<BatchEntity>().WithOne().HasForeignKey<BatchClosureAudit>(row => row.BatchId).OnDelete(DeleteBehavior.Restrict);
         var inspection = model.Entity<InspectionAttempt>();
         inspection.ToTable("Inspections");
         inspection.HasKey(x => x.Id);

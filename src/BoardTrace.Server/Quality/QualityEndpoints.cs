@@ -3,7 +3,6 @@ using BoardTrace.Contracts;
 using BoardTrace.Server.Identity;
 using BoardTrace.Server.Storage;
 using Microsoft.AspNetCore.Identity;
-using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 
 namespace BoardTrace.Server.Quality;
@@ -89,28 +88,29 @@ public static class QualityEndpoints
             _ => false
         };
         if (!allowed) return Conflict("该执行状态不允许此人工处置；技术失败或中断不能形成质量接受或拒收判定。");
+        await using var transaction = await db.Database.BeginTransactionAsync(token);
+        await db.Batches.Where(batch => batch.Id == row.BatchId).ExecuteUpdateAsync(update =>
+            update.SetProperty(batch => batch.Status, batch => batch.Status), token);
+        // Re-check after acquiring the same lock used by closure and receipt writes.
+        existing = await db.InspectionReviews.AsNoTracking().SingleOrDefaultAsync(review => review.InspectionId == id, token);
+        if (existing is not null)
+        {
+            await transaction.CommitAsync(token);
+            return await Repeat(existing, request, user.Id, row.ReworkOrderId, db, token);
+        }
+        var batch = await db.Batches.AsNoTracking().SingleAsync(batch => batch.Id == row.BatchId, token);
+        if (batch.Status == BatchStatus.Closed) return Conflict("批次已经关闭，不能新增复核或返工指令。");
         var now = DateTimeOffset.UtcNow;
         var review = new InspectionReview(id, request.Disposition, request.Note, user.Id, user.DisplayName, now);
         db.InspectionReviews.Add(review);
         if (request.Disposition == ReviewDisposition.Rework)
         {
-            var batch = await db.Batches.AsNoTracking().SingleAsync(batch => batch.Id == row.BatchId, token);
             db.ReworkOrders.Add(new ReworkOrder(Guid.NewGuid(), id, batch.Id, row.StationId, row.ProductId,
                 row.SampleId, batch.RecipeVersionId, batch.RecipeBundleHash, request.Note, user.Id, user.DisplayName, now));
         }
-        try
-        {
-            // EF saves the final review and its optional order in one transaction.
-            await db.SaveChangesAsync(token);
-            return Results.Created($"/api/quality/inspections/{id}", await ReadDetails(id, row.ReworkOrderId, db, token));
-        }
-        catch (DbUpdateException error) when (error.InnerException is SqlException { Number: 2601 or 2627 })
-        {
-            db.ChangeTracker.Clear();
-            existing = await db.InspectionReviews.AsNoTracking().SingleOrDefaultAsync(review => review.InspectionId == id, token);
-            if (existing is null) throw;
-            return await Repeat(existing, request, user.Id, row.ReworkOrderId, db, token);
-        }
+        await db.SaveChangesAsync(token);
+        await transaction.CommitAsync(token);
+        return Results.Created($"/api/quality/inspections/{id}", await ReadDetails(id, row.ReworkOrderId, db, token));
     }
 
     private static async Task<IResult> Repeat(InspectionReview existing, CreateInspectionReviewRequest request,

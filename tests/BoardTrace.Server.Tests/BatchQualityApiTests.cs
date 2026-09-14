@@ -204,9 +204,9 @@ public sealed partial class BatchApiTests
 
     private static string ReviewUrl(Guid id) => $"/api/quality/inspections/{id}/review";
 
-    private static async Task<(BatchDetails, BatchExecutionSession)> StartQualityBatch(BatchServer server)
+    private static async Task<(BatchDetails, BatchExecutionSession)> StartQualityBatch(BatchServer server, int quantity = 2)
     {
-        var batch = await server.CreateBatch();
+        var batch = await server.CreateBatch(quantity);
         var first = server.Record(batch, InspectionPurpose.FirstArticle);
         await server.Upload(first);
         await server.Status(server.Quality.PutAsJsonAsync($"/api/batches/{batch.Batch.Id}/first-article-approval", new ApproveFirstArticleRequest(first.Id)), HttpStatusCode.Created);

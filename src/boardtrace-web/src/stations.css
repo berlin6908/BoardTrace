@@ -1,0 +1,11 @@
+.station-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 18px; }
+.station-card { padding: 22px; background: #fff; border: 1px solid #dfe8e9; border-radius: 12px; }
+.station-card-heading { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
+.station-card-heading h2 { margin: 0 0 4px; font-size: 19px; }
+.station-card-heading span { color: #617482; }
+.station-facts { margin: 20px 0 0; }
+.station-facts div { display: flex; justify-content: space-between; gap: 12px; padding: 8px 0; border-top: 1px solid #eff2f3; }
+.station-facts dt { color: #667883; }
+.station-facts dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
+.station-alarms { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.station-alarms .el-alert { width: 100%; }

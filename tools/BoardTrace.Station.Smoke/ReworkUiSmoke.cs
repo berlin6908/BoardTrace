@@ -138,8 +138,93 @@ public static partial class Program
                 InspectionTransfer.Hash(repeated), context.Options.DatabasePath, output));
             await WriteLive(Path.Combine(context.Output, "before-final-review.json"), new { batch = centralBatch, queue, refreshed, child,
                 scope = "真实WPF/SQL质量链；同一缺陷图再次检测仍Fail，非修复后的真实产品；方案行是非质量发布夹具。" });
+            if (scope == "closure-live")
+                await VerifyClosureLive(context, output, model, window, store, process, quality, batch, original, repeated);
         }
         finally { window.Close(); }
+    }
+
+    private static async Task VerifyClosureLive(ReworkUiContext context, string output, StationViewModel model,
+        MainWindow window, LocalInspectionStore store, HttpClient process, HttpClient quality, BatchDetails batch,
+        InspectionRecord original, InspectionRecord repeated)
+    {
+        var archive = store.ReadActiveBatch()!.ArchiveId;
+        BatchClosureCheck? check = null;
+        var reportDeadline = DateTimeOffset.UtcNow.AddSeconds(40);
+        while (DateTimeOffset.UtcNow < reportDeadline)
+        {
+            check = await quality.GetFromJsonAsync<BatchClosureCheck>($"api/batches/{batch.Batch.Id}/closure");
+            if (check?.Station is { IsOnline: true, Runtime: { PendingUploads: 0, FirstArticleCount: 1,
+                    ProductionCount: 1, ReinspectionCount: 1, HasStartedInspection: false, HasUnacknowledgedPlc: false } runtime }
+                && runtime.ArchiveId == archive) break;
+            await Task.Delay(500);
+        }
+        Require(check is { CanClose: false, UnreviewedCount: 1, PendingReworkOrders: 0, Station.IsOnline: true }
+            && check.CentralCounts == new BatchCounts(1, 1, 1), "Actual WPF runtime did not identify the unreviewed batch closure blocker.");
+        using (var blocked = await quality.PostAsync($"api/batches/{batch.Batch.Id}/close", null))
+        {
+            Require(blocked.StatusCode == HttpStatusCode.Conflict, "Unreviewed reinspection incorrectly allowed batch closure.");
+            var response = await blocked.Content.ReadFromJsonAsync<BatchClosureCheck>();
+            Require(response is { CanClose: false, UnreviewedCount: 1 }, "Blocked closure did not return its current quality blocker.");
+        }
+        await SnapshotAsync(window, Path.Combine(output, "04-live-runtime-awaiting-browser-close.png"));
+        await WriteLive(Path.Combine(context.Output, "ready-for-close-browser.json"), new { batchId = batch.Batch.Id,
+            archiveId = archive, check, runtimeReceivedAt = model.RuntimeReceivedAt, deadlineMinutes = 15 });
+        Console.WriteLine("Actual WPF runtime is reporting. Waiting for browser quality disposition and batch close.");
+        var deadline = DateTimeOffset.UtcNow.AddMinutes(15);
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            check = await quality.GetFromJsonAsync<BatchClosureCheck>($"api/batches/{batch.Batch.Id}/closure");
+            if (check?.Status == BatchStatus.Closed) break;
+            await Task.Delay(1000);
+        }
+        Require(check is { Status: BatchStatus.Closed, Closure: not null } && check.Closure.ArchiveId == archive,
+            "Browser did not complete quality disposition and close the original archive within 15 minutes.");
+        var closureAudit = check!.Closure!;
+        using (var repeatClose = await quality.PostAsync($"api/batches/{batch.Batch.Id}/close", null))
+        {
+            Require(repeatClose.StatusCode == HttpStatusCode.OK, "Repeat close did not return the original audit.");
+            Require(await repeatClose.Content.ReadFromJsonAsync<BatchClosureAudit>() == closureAudit,
+                "Repeat close changed the original quality audit.");
+        }
+        var report = (await quality.GetFromJsonAsync<BatchOperationalReport>($"api/batches/{batch.Batch.Id}/report"))!;
+        using var csvResponse = await quality.GetAsync($"api/batches/{batch.Batch.Id}/report.csv");
+        csvResponse.EnsureSuccessStatusCode();
+        var csv = await csvResponse.Content.ReadAsStringAsync();
+        Require(report.Status == BatchStatus.Closed && report.Closure == closureAudit && report.Inspections.Count == 3
+            && report.Summary.FirstInspection == new FirstInspectionYield(1, 0, 1, 0)
+            && report.Summary.Purposes.Single(row => row.Purpose == InspectionPurpose.Reinspection).Attempts == 1
+            && report.Summary.BySource.Single(row => row.SourceKind == "ConstructedNormal").FirstInspection.EvaluatedProducts == 0
+            && report.Inspections.Single(row => row.Inspection.Id == original.Id).Quality.ReinspectionId == repeated.Id
+            && report.Inspections.Single(row => row.Inspection.Id == repeated.Id).Quality.SourceReworkOrder?.OriginalInspectionId == original.Id
+            && report.Inspections.Single(row => row.Inspection.Id == repeated.Id).Quality.Review?.Disposition == ReviewDisposition.Reject
+            && csvResponse.Content.Headers.ContentDisposition?.DispositionType == "attachment"
+            && csv.Contains(original.Id.ToString()) && csv.Contains(repeated.Id.ToString()),
+            "Closed JSON/CSV report mixed first-pass yield, reinspection, constructed normal or immutable quality links.");
+        await WriteLive(Path.Combine(context.Output, "closed-report.json"), report);
+        await File.WriteAllTextAsync(Path.Combine(context.Output, "closed-report.csv"), csv);
+        await VerifyLiveRecord(quality, store, original);
+        await VerifyLiveRecord(quality, store, repeated);
+        await model.RefreshActiveBatchCommand.ExecuteAsync(null);
+        Require(store.ReadActiveBatch() is { Status: BatchStatus.Closed, Session: null }
+            && !model.RunCommand.CanExecute(null), "WPF did not apply Closed and revoke the original execution session.");
+        await SnapshotAsync(window, Path.Combine(output, "05-closed-batch-local.png"));
+        using var created = await process.PostAsJsonAsync("api/batches", new CreateBatchRequest(
+            "SIM-NEXT-" + Guid.NewGuid().ToString("N")[..8], "隔离模拟 PCB", "TOP-640x640", 1,
+            context.Options.StationId, context.RecipeVersionId));
+        Require(created.StatusCode == HttpStatusCode.Created, "Could not assign the next simulation batch.");
+        var next = (await created.Content.ReadFromJsonAsync<BatchDetails>())!;
+        await model.RefreshBatchesCommand.ExecuteAsync(null);
+        model.SelectedBatch = model.AssignedBatches.Single(row => row.Summary.Batch.Id == next.Batch.Id);
+        Require(model.DownloadBatchCommand.CanExecute(null), "Closed local batch still prevented downloading the next batch.");
+        await model.DownloadBatchCommand.ExecuteAsync(null);
+        Require(store.ReadActiveBatch() is { Status: BatchStatus.AwaitingFirstArticle, AcceptedProductionCount: 0, Session: null } active
+            && active.Batch.Id == next.Batch.Id && active.ArchiveId != archive && model.RunCommand.CanExecute(null)
+            && store.ReadRecent().Count == 3, "Next batch reused the old archive/counts or removed its historical inspections.");
+        await SnapshotAsync(window, Path.Combine(output, "06-next-batch-first-article-ready.png"));
+        await WriteLive(Path.Combine(context.Output, "closure-live-verified.json"), new { verifiedAt = DateTimeOffset.UtcNow,
+            closed = check, next = store.ReadActiveBatch(), oldOriginalHash = InspectionTransfer.Hash(store.Get(original.Id)!),
+            oldReinspectionHash = InspectionTransfer.Hash(store.Get(repeated.Id)!), pending = store.PendingCount(), wpfEvidence = output });
     }
 
     private static async Task VerifyLiveRecord(HttpClient quality, LocalInspectionStore store, InspectionRecord expected)

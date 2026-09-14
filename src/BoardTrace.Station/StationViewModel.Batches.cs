@@ -46,7 +46,7 @@ public sealed partial class StationViewModel
         get
         {
             if (activeBatch is null) return "当前为工程回放";
-            if (activeBatch.Status == BatchStatus.Closed) return "批次已关闭";
+            if (activeBatch.Status == BatchStatus.Closed) return "中央已关闭批次 · 可下载下一批";
             if (activeRework?.InspectionId is not null) return "本次复检已接件 · 不能重复执行";
             if (activeBatch.Status == BatchStatus.AwaitingFirstArticle)
                 return passedFirstArticle is null ? "等待首件检测"
@@ -75,7 +75,7 @@ public sealed partial class StationViewModel
     {
         RefreshBatchesCommand = new AsyncRelayCommand(RefreshBatchesAsync, () => CanEdit && batchClient != null);
         DownloadBatchCommand = new AsyncRelayCommand(DownloadBatchAsync, () => CanEdit && batchClient != null && SelectedBatch != null
-            && !coordinator.IsFaulted && (activeBatch is null || activeBatch.Batch.Id == SelectedBatch.Summary.Batch.Id));
+            && !coordinator.IsFaulted && (activeBatch is null || activeBatch.Status == BatchStatus.Closed || activeBatch.Batch.Id == SelectedBatch.Summary.Batch.Id));
         RefreshActiveBatchCommand = new AsyncRelayCommand(RefreshActiveBatchAsync, () => CanEdit && batchClient != null && activeBatch != null && !coordinator.IsFaulted);
         StartBatchCommand = new AsyncRelayCommand(StartBatchAsync, () => CanEdit && !coordinator.IsFaulted && activeBatch is { Approval: not null }
             && activeBatch.Status is BatchStatus.Approved or BatchStatus.InProgress && !HasCurrentBatchSession()
@@ -176,6 +176,17 @@ public sealed partial class StationViewModel
         await RefreshBatchStateAsync();
         BatchNotice = BatchStateText;
         RecipeNotice = "批次绑定完整缓存方案，版本与参考资产已固定。";
+        if (activeBatch?.Status == BatchStatus.Closed)
+        {
+            BatchNotice = "中央已关闭此批次，人员授权已结束。刷新工位批次后可下载下一批，旧档案继续保留。";
+            Status = "中央已关闭批次";
+            Notice = BatchNotice;
+        }
+        else
+        {
+            Status = BatchStateText;
+            Notice = $"已加载批次 {ActiveBatchNumber}，检测使用已核对的固定方案与参考图。";
+        }
         AddEvent($"批次 {ActiveBatchNumber} 已加载 · {BatchStateText}。");
     }
 

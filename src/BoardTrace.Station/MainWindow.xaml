@@ -118,6 +118,10 @@
                         <Run Text="中央同步 · " /><Run Text="{Binding UploadStatus, Mode=OneWay}" FontWeight="SemiBold" />
                     </TextBlock>
                     <TextBlock Text="{Binding UploadNotice}" Foreground="#647B89" TextWrapping="Wrap" FontSize="11" Margin="2,3,0,0" />
+                    <TextBlock Foreground="#506775" FontSize="12" Margin="2,7,0,0">
+                        <Run Text="工位上报 · " /><Run Text="{Binding RuntimeStatus, Mode=OneWay}" FontWeight="SemiBold" />
+                    </TextBlock>
+                    <TextBlock Text="{Binding RuntimeNotice}" Foreground="#647B89" TextWrapping="Wrap" FontSize="11" Margin="2,3,0,0" />
                 </StackPanel>
                 <Border Grid.Row="2" Style="{StaticResource Card}">
                     <Grid>

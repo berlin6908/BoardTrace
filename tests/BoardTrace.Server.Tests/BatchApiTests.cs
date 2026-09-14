@@ -223,7 +223,7 @@ public sealed partial class BatchApiTests
     }
 
     [Fact]
-    public async Task ClosedBatchStillAcceptsPreviouslyStartedProductionOnFirstUpload()
+    public async Task ClosedBatchRejectsNewIdsButPreservesOriginalReceipt()
     {
         await using var server = await BatchServer.CreateAsync();
         var batch = await server.CreateBatch();
@@ -240,15 +240,19 @@ public sealed partial class BatchApiTests
             ExecutionSessionId = session.Id, ProductionSequence = 1,
             StartedAt = session.IssuedAt, CompletedAt = session.IssuedAt.AddMilliseconds(1)
         };
-        await server.Execute("UPDATE Batches SET Status='Closed'");
         await server.Upload(pending);
+        await server.Upload(pending with { Id = Guid.NewGuid(), ProductionSequence = 2 });
+        await ReportRuntime(server, Runtime(batch, server.ArchiveId, 1, 2, 0));
+        await server.Status(server.Quality.PostAsync($"/api/batches/{batch.Batch.Id}/close", null), HttpStatusCode.Created);
         await server.Status(server.Device.PutAsJsonAsync($"/api/inspections/{pending.Id}", pending), HttpStatusCode.OK);
+        var late = pending with { Id = Guid.NewGuid() };
+        await server.Status(server.Device.PutAsJsonAsync($"/api/inspections/{late.Id}", late), HttpStatusCode.Conflict);
         var invalid = pending with { Id = Guid.NewGuid(), StartedAt = session.ExpiresAt.AddSeconds(1), CompletedAt = session.ExpiresAt.AddSeconds(2) };
         await server.Status(server.Device.PutAsJsonAsync($"/api/inspections/{invalid.Id}", invalid), HttpStatusCode.Conflict);
         var postApprovalFirst = server.Record(batch, InspectionPurpose.FirstArticle) with { StartedAt = DateTimeOffset.UtcNow.AddMinutes(1), CompletedAt = DateTimeOffset.UtcNow.AddMinutes(1) };
         await server.Status(server.Device.PutAsJsonAsync($"/api/inspections/{postApprovalFirst.Id}", postApprovalFirst), HttpStatusCode.Conflict);
         var detail = (await server.Quality.GetFromJsonAsync<BatchDetails>($"/api/batches/{batch.Batch.Id}"))!;
-        Assert.Equal(1, detail.ReceivedProductionCount);
+        Assert.Equal(2, detail.ReceivedProductionCount);
     }
 
     private sealed class BatchServer : IAsyncDisposable
@@ -320,7 +324,7 @@ public sealed partial class BatchApiTests
         }
         public Task LoginDevice() => Login(Device, "station-a");
         public CreateBatchRequest Request() => new("ISOLATED-BATCH", "PCB", "TOP", 2, "STATION-A", Version.Bundle.VersionId);
-        public async Task<BatchDetails> CreateBatch() { using var response = await Engineer.PostAsJsonAsync("/api/batches", Request()); Assert.Equal(HttpStatusCode.Created, response.StatusCode); return (await response.Content.ReadFromJsonAsync<BatchDetails>())!; }
+        public async Task<BatchDetails> CreateBatch(int quantity = 2) { using var response = await Engineer.PostAsJsonAsync("/api/batches", Request() with { PlannedQuantity = quantity }); Assert.Equal(HttpStatusCode.Created, response.StatusCode); return (await response.Content.ReadFromJsonAsync<BatchDetails>())!; }
         public InspectionRecord Record(BatchDetails batch, InspectionPurpose purpose) => new()
         {
             Id = Guid.NewGuid(), Purpose = purpose, BatchId = batch.Batch.Id, StationId = "STATION-A", ProductId = "SIMULATED-PRODUCT",

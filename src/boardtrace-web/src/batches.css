@@ -15,4 +15,14 @@
 .batch-approval-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 18px 28px 30px; border-top: 1px solid #e4ebee; }
 .batch-approval-actions .el-alert { width: 100%; }
 .batch-approval-actions .section-note { flex-basis: 100%; margin: 0; }
+.batch-closure, .batch-report { border-top: 1px solid #e4ebee; margin-top: 26px; padding-top: 22px; }
+.batch-closure .section-heading h3, .batch-report .section-heading h3 { margin: 0; font-size: 17px; }
+.batch-closure .el-alert, .batch-report .el-alert { margin: 12px 0; }
+.batch-blockers { margin: 12px 0; padding-left: 24px; color: #8b4821; }
+.batch-blockers li { margin: 4px 0; }
+.batch-report .batch-actions { justify-content: flex-start; margin: 16px 0; flex-wrap: wrap; }
+.report-download { display: inline-flex; align-items: center; justify-content: center; min-height: 32px; padding: 8px 15px; border: 1px solid #dcdfe6; border-radius: 4px; color: #344f61; background: #fff; font-size: 14px; line-height: 1; text-decoration: none; }
+.report-download:hover, .report-download:focus-visible { border-color: #66a9ac; color: #176b6e; background: #f3faf9; }
+.batch-report h4 { margin: 18px 0 8px; }
+.batch-report-row { display: flex; flex-wrap: wrap; gap: 8px 16px; justify-content: space-between; padding: 8px 0; border-top: 1px solid #edf1f2; }
 @media (max-width: 600px) { .batch-actions { flex-wrap: wrap; } }

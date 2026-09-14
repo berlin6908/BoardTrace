@@ -9,6 +9,7 @@ import TracePage from './TracePage.vue'
 import RecipesPage from './RecipesPage.vue'
 import BatchPage from './BatchPage.vue'
 import QualityPage from './QualityPage.vue'
+import StationsPage from './StationsPage.vue'
 
 const user = ref<CurrentUser | null>(null)
 const checkingSession = ref(true)
@@ -19,9 +20,9 @@ const password = ref('')
 const authError = ref('')
 const logoutError = ref('')
 const connectionFailed = ref(false)
-const activePage = ref<'trace' | 'recipes' | 'batches' | 'quality'>(window.location.hash === '#quality' ? 'quality' : window.location.hash === '#batches' ? 'batches' : window.location.hash === '#recipes' ? 'recipes' : 'trace')
+const activePage = ref<'trace' | 'recipes' | 'batches' | 'quality' | 'stations'>(window.location.hash === '#stations' ? 'stations' : window.location.hash === '#quality' ? 'quality' : window.location.hash === '#batches' ? 'batches' : window.location.hash === '#recipes' ? 'recipes' : 'trace')
 
-function navigate(page: 'trace' | 'recipes' | 'batches' | 'quality') {
+function navigate(page: 'trace' | 'recipes' | 'batches' | 'quality' | 'stations') {
   activePage.value = page
   window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}${page === 'trace' ? '' : `#${page}`}`)
 }
@@ -121,11 +122,13 @@ onMounted(checkSession)
           <button type="button" :class="{ active: activePage === 'recipes' }" :aria-current="activePage === 'recipes' ? 'page' : undefined" @click="navigate('recipes')">方案验证</button>
           <button type="button" :class="{ active: activePage === 'batches' }" :aria-current="activePage === 'batches' ? 'page' : undefined" @click="navigate('batches')">批次与首件</button>
           <button type="button" :class="{ active: activePage === 'quality' }" :aria-current="activePage === 'quality' ? 'page' : undefined" @click="navigate('quality')">质量复核</button>
+          <button type="button" :class="{ active: activePage === 'stations' }" :aria-current="activePage === 'stations' ? 'page' : undefined" @click="navigate('stations')">工位概览</button>
         </nav>
         <TracePage v-if="activePage === 'trace'" :key="user.id" :user="user" @session-expired="sessionExpired" />
         <RecipesPage v-else-if="activePage === 'recipes'" :key="user.id" :user="user" @session-expired="sessionExpired" />
         <BatchPage v-else-if="activePage === 'batches'" :key="user.id" :user="user" @session-expired="sessionExpired" />
-        <QualityPage v-else :key="user.id" :user="user" @session-expired="sessionExpired" />
+        <QualityPage v-else-if="activePage === 'quality'" :key="user.id" :user="user" @session-expired="sessionExpired" />
+        <StationsPage v-else :key="user.id" @session-expired="sessionExpired" />
       </template>
     </div>
   </ElConfigProvider>
