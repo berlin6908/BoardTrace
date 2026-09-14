@@ -1,12 +1,12 @@
 using System.Diagnostics;
 using System.Text.Json;
 using System.Security.Cryptography;
+using BoardTrace.Vision;
 using Microsoft.Data.SqlClient;
 using Microsoft.ML.OnnxRuntime;
-using Microsoft.ML.OnnxRuntime.Tensors;
 using OpenCvSharp;
 
-if (args.Length == 0) throw new ArgumentException("Usage: vision <test> <reference> | onnx <model> <image> | sql");
+if (args.Length == 0) throw new ArgumentException("Usage: vision <test> <reference> | onnx <model> <sha256> <tested> <reference> | sql");
 object report;
 switch (args[0])
 {
@@ -25,31 +25,22 @@ switch (args[0])
         }
         break;
     case "onnx":
-        using (var session = new InferenceSession(args[1]))
-        using (var image = Cv2.ImDecode(File.ReadAllBytes(args[2]), ImreadModes.Color))
+        if (args.Length != 5) throw new ArgumentException("onnx <model> <sha256> <tested> <reference>");
+        using (var detector = new OnnxDetector(args[1], args[2]))
         {
-            if (image.Empty()) throw new InvalidDataException("Image did not decode.");
-            var height = image.Height;
-            var width = image.Width;
-            var tensor = new DenseTensor<float>(new[] { 1, 3, height, width });
-            for (var y = 0; y < height; y++)
-                for (var x = 0; x < width; x++)
-                {
-                    var pixel = image.At<Vec3b>(y, x);
-                    tensor[0, 0, y, x] = pixel.Item2 / 255f;
-                    tensor[0, 1, y, x] = pixel.Item1 / 255f;
-                    tensor[0, 2, y, x] = pixel.Item0 / 255f;
-                }
-            var input = NamedOnnxValue.CreateFromTensor(session.InputMetadata.Keys.Single(), tensor);
-            var watch = Stopwatch.StartNew();
-            using var output = session.Run(new[] { input });
+            var tested = File.ReadAllBytes(args[3]);
+            var reference = File.ReadAllBytes(args[4]);
+            // Keep every candidate in the exported graph's original order for comparison.
+            var result = detector.Detect(tested, reference, new OnnxScoreThresholds(0, 0, 0, 0, 0, 0));
             report = new { probe = "onnx", runtime = OrtEnv.Instance().GetVersionString(),
-                modelSha256 = Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(args[1]))),
-                imageSha256 = Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(args[2]))),
-                elapsedMs = watch.Elapsed.TotalMilliseconds,
-                boxes = output.Single(v => v.Name == "boxes").AsTensor<float>().ToArray(),
-                labels = output.Single(v => v.Name == "labels").AsTensor<long>().ToArray(),
-                scores = output.Single(v => v.Name == "scores").AsTensor<float>().ToArray() };
+                modelSha256 = detector.ModelSha256,
+                imageSha256 = Convert.ToHexStringLower(SHA256.HashData(tested)),
+                referenceSha256 = Convert.ToHexStringLower(SHA256.HashData(reference)),
+                elapsedMs = result.ElapsedMs, sessionInitializationMs = detector.SessionInitializationMs,
+                timingDescription = "ElapsedMs includes paired decode, preprocessing, CPU inference and output validation; excludes file reads, SHA verification and session construction.",
+                boxes = result.Defects.SelectMany(defect => defect.Box).ToArray(),
+                labels = result.Defects.Select(defect => defect.ClassId!.Value).ToArray(),
+                scores = result.Defects.Select(defect => defect.Score).ToArray() };
         }
         break;
     case "sql":

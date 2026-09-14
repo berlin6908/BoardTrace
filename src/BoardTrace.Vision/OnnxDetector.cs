@@ -8,7 +8,8 @@ namespace BoardTrace.Vision;
 /// <summary>
 /// Runs the exported BoardTrace detector. Owns one CPU session; callers must serialize
 /// Detect and Dispose, as a station executes one inspection at a time.
-/// The model accepts RGB / 255 and contains its own normalization and NMS.
+/// Input planes are tested grayscale, reference grayscale and their absolute difference,
+/// each divided by 255. The model contains normalization (mean/std 0.5) and NMS.
 /// </summary>
 public sealed class OnnxDetector : IDisposable
 {
@@ -53,38 +54,29 @@ public sealed class OnnxDetector : IDisposable
         }
     }
 
-    public DetectionResult Detect(byte[] testedBytes, double scoreThreshold, CancellationToken cancellationToken = default)
+    public DetectionResult Detect(byte[] testedBytes, byte[] referenceBytes, OnnxScoreThresholds scoreThresholds,
+        CancellationToken cancellationToken = default)
     {
         var watch = Stopwatch.StartNew();
         ObjectDisposedException.ThrowIf(disposed, this);
         cancellationToken.ThrowIfCancellationRequested();
         ArgumentNullException.ThrowIfNull(testedBytes);
-        if (!double.IsFinite(scoreThreshold) || scoreThreshold < 0 || scoreThreshold > 1)
-            throw new ArgumentOutOfRangeException(nameof(scoreThreshold), "置信度阈值必须在 0 到 1 之间。");
-        if (testedBytes.Length == 0)
-            throw new InvalidDataException("待检图像为空。");
+        ArgumentNullException.ThrowIfNull(referenceBytes);
+        ArgumentNullException.ThrowIfNull(scoreThresholds);
+        scoreThresholds.Validate();
 
-        using var image = Decode(testedBytes);
-        if (image.Empty())
-            throw new InvalidDataException("无法解码待检图像。");
-        if (image.Width != Size || image.Height != Size)
-            throw new InvalidDataException("ONNX 检测要求 640 × 640 待检图像。");
-        using (var gray = new Mat())
-        {
-            Cv2.CvtColor(image, gray, ColorConversionCodes.BGR2GRAY);
-            Cv2.MeanStdDev(gray, out _, out Scalar deviation);
-            if (deviation.Val0 < 5)
-                throw new InvalidDataException("待检图像缺少有效对比度。");
-        }
+        using var tested = Decode(testedBytes, "待检");
+        using var reference = Decode(referenceBytes, "参考");
 
-        image.GetArray(out Vec3b[] pixels);
+        tested.GetArray(out byte[] testedPixels);
+        reference.GetArray(out byte[] referencePixels);
         var plane = Size * Size;
         var input = new float[3 * plane];
         for (var i = 0; i < plane; i++)
         {
-            input[i] = pixels[i].Item2 / 255f;
-            input[plane + i] = pixels[i].Item1 / 255f;
-            input[2 * plane + i] = pixels[i].Item0 / 255f;
+            input[i] = testedPixels[i] / 255f;
+            input[plane + i] = referencePixels[i] / 255f;
+            input[2 * plane + i] = Math.Abs(testedPixels[i] - referencePixels[i]) / 255f;
         }
         cancellationToken.ThrowIfCancellationRequested();
         using var tensor = OrtValue.CreateTensorValueFromMemory(input, [1, 3, Size, Size]);
@@ -110,7 +102,7 @@ public sealed class OnnxDetector : IDisposable
                     || box[0] < 0 || box[1] < 0 || box[2] > Size || box[3] > Size
                     || box[2] < box[0] || box[3] < box[1])
                     throw new InvalidDataException("ONNX 检测输出包含无效类别、分数或边界框。");
-                if (scores[i] >= scoreThreshold)
+                if (scores[i] >= scoreThresholds.ForClass((int)labels[i]))
                 {
                     // ONNX provides boxes, not segmentation masks: Area is bounding-box area.
                     var area = (int)Math.Round((double)(box[2] - box[0]) * (box[3] - box[1]));
@@ -118,9 +110,9 @@ public sealed class OnnxDetector : IDisposable
                 }
             }
             cancellationToken.ThrowIfCancellationRequested();
-            return new DetectionResult(defects.Count == 0 ? "Pass" : "Fail", Size, Size, defects,
-                watch.Elapsed.TotalMilliseconds,
-                new Dictionary<string, double> { ["candidateCount"] = scores.Length, ["scoreThreshold"] = scoreThreshold });
+            var diagnostics = new Dictionary<string, double> { ["candidateCount"] = scores.Length };
+            for (var classId = 1; classId <= 6; classId++) diagnostics[$"scoreThreshold{classId}"] = scoreThresholds.ForClass(classId);
+            return new DetectionResult(defects.Count == 0 ? "Pass" : "Fail", Size, Size, defects, watch.Elapsed.TotalMilliseconds, diagnostics);
         }
         catch (OnnxRuntimeException) when (cancellationToken.IsCancellationRequested)
         {
@@ -132,15 +124,31 @@ public sealed class OnnxDetector : IDisposable
         }
     }
 
-    private static Mat Decode(byte[] bytes)
+    private static Mat Decode(byte[] bytes, string kind)
     {
+        if (bytes.Length == 0) throw new InvalidDataException($"{kind}图像为空。");
+        Mat image;
         try
         {
-            return Cv2.ImDecode(bytes, ImreadModes.Color);
+            image = Cv2.ImDecode(bytes, ImreadModes.Grayscale);
         }
         catch (OpenCVException exception)
         {
-            throw new InvalidDataException("无法解码待检图像。", exception);
+            throw new InvalidDataException($"无法解码{kind}图像。", exception);
+        }
+        try
+        {
+            if (image.Empty()) throw new InvalidDataException($"无法解码{kind}图像。");
+            if (image.Width != Size || image.Height != Size)
+                throw new InvalidDataException($"ONNX 检测要求 640 × 640 {kind}图像。");
+            Cv2.MeanStdDev(image, out _, out Scalar deviation);
+            if (deviation.Val0 < 5) throw new InvalidDataException($"{kind}图像缺少有效对比度。");
+            return image;
+        }
+        catch
+        {
+            image.Dispose();
+            throw;
         }
     }
 
