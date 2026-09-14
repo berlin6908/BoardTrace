@@ -87,15 +87,56 @@ function Start-Owned([string] $file, [string[]] $arguments, [string] $folder, [s
     if ($null -eq $process) { throw "无法启动 $name" }
     $stdout = [IO.File]::Create((Join-Path $folder "$name.stdout.log"))
     $stderr = [IO.File]::Create((Join-Path $folder "$name.stderr.log"))
+    $copyCancellation = [Threading.CancellationTokenSource]::new()
     return [pscustomobject]@{
         Name = $name; Folder = $folder; File = $file; Arguments = @($arguments);
         Process = $process; Stdout = $stdout; Stderr = $stderr
-        OutTask = $process.StandardOutput.BaseStream.CopyToAsync($stdout)
-        ErrTask = $process.StandardError.BaseStream.CopyToAsync($stderr)
+        OutSource = $process.StandardOutput.BaseStream; ErrSource = $process.StandardError.BaseStream
+        CopyCancellation = $copyCancellation
+        OutTask = $process.StandardOutput.BaseStream.CopyToAsync($stdout, $copyCancellation.Token)
+        ErrTask = $process.StandardError.BaseStream.CopyToAsync($stderr, $copyCancellation.Token)
     }
 }
 
+function Stop-Owned($item) {
+    $cleanupStarted = [DateTimeOffset]::UtcNow
+    $errors = [Collections.Generic.List[string]]::new()
+    $processId = $item.Process.Id
+    $exited = $false
+    $exitCode = $null
+    $logsComplete = $false
+    try {
+        if (-not $item.Process.HasExited) { $item.Process.Kill($true) }
+        if (-not $item.Process.WaitForExit(5000)) { throw '进程终止后 5 秒内未退出。' }
+        $exited = $true
+        $exitCode = $item.Process.ExitCode
+    } catch { $errors.Add($_.Exception.Message) }
+    try {
+        $copies = [Threading.Tasks.Task]::WhenAll([Threading.Tasks.Task[]]@($item.OutTask, $item.ErrTask))
+        $copies.WaitAsync([TimeSpan]::FromSeconds(5)).GetAwaiter().GetResult()
+        $logsComplete = $true
+    } catch {
+        $errors.Add('输出日志未完整排空：' + $_.Exception.Message)
+        try { $item.CopyCancellation.CancelAsync().WaitAsync([TimeSpan]::FromSeconds(1)).GetAwaiter().GetResult() }
+        catch { $errors.Add('取消输出复制失败：' + $_.Exception.Message) }
+    }
+    foreach ($stream in @($item.OutSource, $item.ErrSource, $item.Stdout, $item.Stderr)) {
+        try { $stream.Dispose() } catch { $errors.Add('关闭输出流失败：' + $_.Exception.Message) }
+    }
+    $outStatus = $item.OutTask.Status.ToString()
+    $errStatus = $item.ErrTask.Status.ToString()
+    try { $item.CopyCancellation.Dispose(); $item.Process.Dispose() }
+    catch { $errors.Add('释放进程资源失败：' + $_.Exception.Message) }
+    return [pscustomobject]@{ name = $item.Name; folder = $item.Folder; pid = $processId;
+        startedAtUtc = $cleanupStarted; finishedAtUtc = [DateTimeOffset]::UtcNow; exited = $exited;
+        exitCode = $exitCode; logsComplete = $logsComplete; stdoutTaskStatus = $outStatus;
+        stderrTaskStatus = $errStatus; errors = @($errors) }
+}
+
 $owned = @()
+$runError = $null
+$systemResult = $null
+$cleanupResults = @()
 try {
     foreach ($item in $runtime) {
         $c = $item.Context
@@ -140,19 +181,22 @@ try {
         @($results | Where-Object { $_.pending -ne 0 -or $null -ne $_.unacknowledged }).Count -ne 0) {
         throw '实际时间、真实生产检测数或最终回执/ACK状态未达验收条件。'
     }
-    [pscustomobject]@{ startedAtUtc = $started; finishedAtUtc = $finished; durationMinutes = ($finished-$started).TotalMinutes;
-        minimumTriggers = $MinimumTriggers; actualProduction = $actual; stations = $results } |
-        ConvertTo-Json -Depth 16 | Set-Content -LiteralPath (Join-Path $output 'system-result.json') -Encoding utf8
+    $systemResult = [pscustomobject]@{ startedAtUtc = $started; finishedAtUtc = $finished; durationMinutes = ($finished-$started).TotalMinutes;
+        minimumTriggers = $MinimumTriggers; actualProduction = $actual; stations = $results }
     if (@($results | Where-Object { $_.failed -ne 0 }).Count -ne 0) {
         throw '存在图像采集/模型执行等技术失败；已保存逐件证据，调查修复后重验。'
     }
-} finally {
-    foreach ($item in $owned) {
-        if (-not $item.Process.HasExited) { $item.Process.Kill($true); $item.Process.WaitForExit() }
-        $item.OutTask.GetAwaiter().GetResult()
-        $item.ErrTask.GetAwaiter().GetResult()
-        $item.Stdout.Dispose()
-        $item.Stderr.Dispose()
-        $item.Process.Dispose()
-    }
+} catch { $runError = $_ }
+finally {
+    foreach ($item in $owned) { $cleanupResults += Stop-Owned $item }
+    try {
+        [pscustomobject]@{ atUtc = [DateTimeOffset]::UtcNow; originalError = if ($runError) { $runError.ToString() } else { $null };
+            processes = $cleanupResults } | ConvertTo-Json -Depth 8 |
+            Set-Content -LiteralPath (Join-Path $output 'cleanup-result.json') -Encoding utf8
+    } catch { if (-not $runError) { $runError = $_ } }
 }
+if ($runError) { throw $runError }
+if (@($cleanupResults | Where-Object { -not $_.exited -or -not $_.logsComplete -or $_.errors.Count -ne 0 }).Count -ne 0) {
+    throw '拥有的进程未完成清理或日志未完整排空；本轮失败，详见 cleanup-result.json。'
+}
+$systemResult | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath (Join-Path $output 'system-result.json') -Encoding utf8
