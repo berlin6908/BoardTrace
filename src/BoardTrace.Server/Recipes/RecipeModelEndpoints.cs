@@ -49,8 +49,9 @@ public static class RecipeModelEndpoints
         var actualHash = Convert.ToHexStringLower(SHA256.HashData(bytes));
         if (!actualHash.Equals(sha256, StringComparison.OrdinalIgnoreCase))
             return Results.Problem(statusCode: 400, title: "上传模型 SHA-256 与指定导出文件不一致。");
-        var existing = await db.RecipeModels.AsNoTracking().SingleOrDefaultAsync(x => x.Sha256 == actualHash, token);
-        if (existing is not null) return Results.Ok(existing.View());
+        var existing = await db.RecipeModels.AsNoTracking().Where(x => x.Sha256 == actualHash)
+            .Select(x => new RecipeModelSummary(x.Sha256, x.ByteLength, x.InputContract, x.CreatedAt)).SingleOrDefaultAsync(token);
+        if (existing is not null) return Results.Ok(existing);
         try
         {
             // Loads and checks the real graph contract, without image inference.
@@ -67,7 +68,8 @@ public static class RecipeModelEndpoints
         catch (DbUpdateException error) when (error.InnerException is SqlException { Number: 2601 or 2627 })
         {
             db.ChangeTracker.Clear();
-            return Results.Ok((await db.RecipeModels.AsNoTracking().SingleAsync(x => x.Sha256 == actualHash, token)).View());
+            return Results.Ok(await db.RecipeModels.AsNoTracking().Where(x => x.Sha256 == actualHash)
+                .Select(x => new RecipeModelSummary(x.Sha256, x.ByteLength, x.InputContract, x.CreatedAt)).SingleAsync(token));
         }
         return Results.Created("/api/recipes/models", model.View());
     }

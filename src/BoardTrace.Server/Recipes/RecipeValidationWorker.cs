@@ -110,9 +110,13 @@ public sealed class RecipeValidationWorker(IServiceScopeFactory scopes, IConfigu
             var definition = JsonSerializer.Deserialize<RecipeDefinition>(run.DefinitionJson)!;
             var targets = JsonSerializer.Deserialize<RecipeTargets>(run.TargetsJson)!;
             var paired = definition as PairedOnnxRecipeDefinition;
-            var model = paired is null ? null : await db.RecipeModels.AsNoTracking()
-                .SingleOrDefaultAsync(x => x.Sha256 == paired.ModelSha256, token)
+            // SqlClient async large-BLOB reads have a measured regression (dotnet/SqlClient#593).
+            // Keep this full model read synchronous; metadata and progress writes remain async.
+            token.ThrowIfCancellationRequested();
+            var model = paired is null ? null : db.RecipeModels.AsNoTracking()
+                .SingleOrDefault(x => x.Sha256 == paired.ModelSha256)
                 ?? throw new InvalidDataException("验证模型资产缺失。");
+            token.ThrowIfCancellationRequested();
             if (model is not null && (model.InputContract != RecipeModelInput.PairedGrayAbsDiff640V1 || model.ByteLength != model.Content.Length))
                 throw new InvalidDataException("验证模型资产声明不符。");
             using var onnx = model is null ? null : new OnnxDetector(model.Content, paired!.ModelSha256);

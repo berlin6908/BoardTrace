@@ -1,5 +1,4 @@
 using System.Security.Claims;
-using System.Security.Cryptography;
 using BoardTrace.Contracts;
 using BoardTrace.Server.Identity;
 using BoardTrace.Server.Recipes;
@@ -113,17 +112,20 @@ public static class BatchEndpoints
     {
         var version = publication.View();
         if (version.BundleHash != PublishedRecipeTransfer.Hash(version.Bundle)) return false;
-        var assets = await db.RecipeAssets.AsNoTracking().Where(asset => asset.RecipeVersionId == publication.Id).ToDictionaryAsync(asset => asset.Id, token);
+        // Batch refresh checks the immutable manifest against SQL metadata (Length becomes DATALENGTH).
+        // Full bytes are hashed at publication and when the station saves/loads the downloaded assets.
+        var assets = await db.RecipeAssets.AsNoTracking().Where(asset => asset.RecipeVersionId == publication.Id)
+            .Select(asset => new { asset.Id, asset.Sha256, ByteLength = asset.Content.Length }).ToDictionaryAsync(asset => asset.Id, token);
         var model = version.Bundle.Model;
         if (version.Bundle.Definition is PairedOnnxRecipeDefinition paired)
         {
             if (model is null || model.Sha256 != paired.ModelSha256 || model.InputContract != RecipeModelInput.PairedGrayAbsDiff640V1 ||
-                !assets.TryGetValue(model.AssetId, out var modelAsset) || modelAsset.Content.Length != model.ByteLength ||
-                Convert.ToHexStringLower(SHA256.HashData(modelAsset.Content)) != model.Sha256) return false;
+                !assets.TryGetValue(model.AssetId, out var modelAsset) || modelAsset.ByteLength != model.ByteLength ||
+                modelAsset.Sha256 != model.Sha256) return false;
         }
         else if (version.Bundle.Definition is not ClassicalRecipeDefinition || model is not null) return false;
         return version.Bundle.References.Count > 0 && version.Bundle.References.All(reference => assets.TryGetValue(reference.AssetId, out var asset) &&
-            asset.Content.Length == reference.ByteLength && Convert.ToHexStringLower(SHA256.HashData(asset.Content)) == reference.Sha256);
+            asset.ByteLength == reference.ByteLength && asset.Sha256 == reference.Sha256);
     }
 
     private static async Task<IResult> Approve(Guid id, ApproveFirstArticleRequest request, ClaimsPrincipal principal,

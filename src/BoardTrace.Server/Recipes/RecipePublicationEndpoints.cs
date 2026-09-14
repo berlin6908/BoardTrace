@@ -115,7 +115,10 @@ public static class RecipePublicationEndpoints
             PublishedRecipeModel? publishedModel = null;
             if (paired is not null)
             {
-                var model = await db.RecipeModels.AsNoTracking().SingleOrDefaultAsync(x => x.Sha256 == paired.ModelSha256, token);
+                // Avoid SqlClient's large-BLOB async read regression; publication still hashes all bytes.
+                token.ThrowIfCancellationRequested();
+                var model = db.RecipeModels.AsNoTracking().SingleOrDefault(x => x.Sha256 == paired.ModelSha256);
+                token.ThrowIfCancellationRequested();
                 if (model is null || model.InputContract != RecipeModelInput.PairedGrayAbsDiff640V1 ||
                     model.ByteLength != model.Content.Length || Hash(model.Content) != paired.ModelSha256)
                     throw new PublicationRejected(409, "模型资产不可用或已改变，请重新上传并验证。");
@@ -185,7 +188,10 @@ public static class RecipePublicationEndpoints
 
     private static async Task<IResult> Reference(Guid id, BoardTraceDbContext db, UserManager<BoardTraceUser> users, HttpContext context, CancellationToken token)
     {
-        var asset = await db.RecipeAssets.AsNoTracking().SingleOrDefaultAsync(asset => asset.Id == id, token);
+        // Models share this endpoint with references and can be large (dotnet/SqlClient#593).
+        token.ThrowIfCancellationRequested();
+        var asset = db.RecipeAssets.AsNoTracking().SingleOrDefault(asset => asset.Id == id);
+        token.ThrowIfCancellationRequested();
         if (asset is null) return Results.NotFound();
         if (!await MayDownload(asset.RecipeVersionId, context.User, users, db, token)) return Results.Forbid();
         context.Response.Headers.CacheControl = "private,no-store";
