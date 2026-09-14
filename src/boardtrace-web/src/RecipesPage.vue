@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { ElAlert, ElButton, ElDialog, ElDrawer, ElEmpty, ElOption, ElProgress, ElSelect, ElSkeleton, ElTag } from 'element-plus'
+import { ElAlert, ElButton, ElDialog, ElDrawer, ElEmpty, ElInput, ElOption, ElProgress, ElSelect, ElSkeleton, ElTag } from 'element-plus'
 import { ApiError, requestError } from './api'
 import type { CurrentUser } from './api'
 import { formatMs, formatTime } from './inspections'
