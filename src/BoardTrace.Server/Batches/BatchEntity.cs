@@ -16,6 +16,7 @@ public sealed class BatchEntity
     public required string CreatedByName { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
     public BatchStatus Status { get; set; }
+    public Guid? ArchiveId { get; set; }
 
     public BatchDefinition Definition() => new(Id, BatchNumber, ProductType, FieldOfView, PlannedQuantity,
         StationId, RecipeVersionId, RecipeBundleHash, CreatedById, CreatedByName, CreatedAt);

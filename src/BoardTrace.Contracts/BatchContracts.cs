@@ -17,11 +17,11 @@ public sealed record FirstArticleApproval(Guid BatchId, Guid InspectionId, strin
 
 public sealed record ApproveFirstArticleRequest(Guid InspectionId);
 
-public sealed record StartBatchRequest(string StationId, string RecipeBundleHash);
+public sealed record StartBatchRequest(string StationId, string RecipeBundleHash, Guid ArchiveId);
 
 public sealed record BatchExecutionSession(Guid Id, Guid BatchId, string StationId, string RecipeBundleHash,
     Guid FirstArticleInspectionId, string OperatorId, string OperatorName, DateTimeOffset IssuedAt,
-    DateTimeOffset ExpiresAt);
+    DateTimeOffset ExpiresAt, Guid ArchiveId);
 
 public sealed record BatchSummary(BatchDefinition Batch, BatchStatus Status, int ReceivedProductionCount);
 

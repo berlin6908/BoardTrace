@@ -154,6 +154,7 @@ public static class BatchEndpoints
     private static async Task<IResult> Start(Guid id, StartBatchRequest request, HttpContext context,
         UserManager<BoardTraceUser> users, BoardTraceDbContext db, CancellationToken token)
     {
+        if (request.ArchiveId == Guid.Empty) return Results.BadRequest("本地执行档案身份不能为空。");
         var batch = await db.Batches.AsNoTracking().SingleOrDefaultAsync(batch => batch.Id == id, token);
         if (batch is null) return Results.NotFound();
         if (batch.StationId != request.StationId || batch.RecipeBundleHash != request.RecipeBundleHash) return Conflict("工位或方案包不属于该批次。");
@@ -168,11 +169,16 @@ public static class BatchEndpoints
         if (await db.Batches.Where(batch => batch.Id == id && (batch.Status == BatchStatus.Approved || batch.Status == BatchStatus.InProgress))
             .ExecuteUpdateAsync(update => update.SetProperty(batch => batch.Status, BatchStatus.InProgress), token) != 1)
             return Conflict("批次当前状态不允许启动生产。");
+        var archiveId = await db.Batches.Where(batch => batch.Id == id).Select(batch => batch.ArchiveId).SingleAsync(token);
+        if (archiveId is not null && archiveId != request.ArchiveId)
+            return Conflict("该批次已绑定另一份执行档案，请恢复原工位 SQLite 档案后继续；不能从空库重新接件。");
+        if (archiveId is null)
+            await db.Batches.Where(batch => batch.Id == id).ExecuteUpdateAsync(update => update.SetProperty(batch => batch.ArchiveId, request.ArchiveId), token);
         var existing = await db.BatchExecutionSessions.AsNoTracking().Where(session => session.BatchId == id && session.OperatorId == user.Id && session.ExpiresAt > now)
             .OrderByDescending(session => session.IssuedAt).FirstOrDefaultAsync(token);
         if (existing is not null) { await transaction.CommitAsync(token); return Results.Ok(existing); }
         var session = new BatchExecutionSession(Guid.NewGuid(), id, batch.StationId, batch.RecipeBundleHash,
-            approval.InspectionId, user.Id, user.DisplayName, now, expiresAt);
+            approval.InspectionId, user.Id, user.DisplayName, now, expiresAt, request.ArchiveId);
         db.BatchExecutionSessions.Add(session);
         await db.SaveChangesAsync(token);
         await transaction.CommitAsync(token);

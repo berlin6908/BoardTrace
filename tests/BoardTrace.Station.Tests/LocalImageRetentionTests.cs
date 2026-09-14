@@ -136,7 +136,7 @@ public sealed class LocalImageRetentionTests
         var approval = new FirstArticleApproval(batch.Id, first.Id, "quality", "Fixture Quality", DateTimeOffset.UtcNow);
         coordinator.UseBatch(new(batch, BatchStatus.Approved, approval, f.Version), f.Loaded);
         coordinator.StartBatch(new(Guid.NewGuid(), batch.Id, batch.StationId, batch.RecipeBundleHash, first.Id,
-            Operator.Id, Operator.DisplayName, DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddHours(1)), null);
+            Operator.Id, Operator.DisplayName, DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddHours(1), f.Store.ReadActiveBatch()!.ArchiveId), null);
         var identity = new InspectionIdentity(Guid.NewGuid(), uint.MaxValue);
         var production = await coordinator.InspectAsync(InspectionPurpose.Production, batch.StationId, "PRODUCTION", Operator,
             new PublishedReplayImageSource(f.Folder, sample), identity: identity);

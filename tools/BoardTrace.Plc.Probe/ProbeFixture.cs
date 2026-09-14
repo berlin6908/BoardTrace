@@ -44,7 +44,7 @@ internal sealed record ProbeFixture(ReplaySample Sample, byte[] Reference, byte[
         var approval = new FirstArticleApproval(batch.Id, first.Id, "fixture-quality", "Isolated Fixture Approval", DateTimeOffset.UtcNow);
         coordinator.UseBatch(new(batch, BatchStatus.Approved, approval, version), loaded);
         coordinator.StartBatch(new(Guid.NewGuid(), batch.Id, batch.StationId, batch.RecipeBundleHash, first.Id,
-            Actor.Id, Actor.DisplayName, DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddHours(1)), null);
+            Actor.Id, Actor.DisplayName, DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddHours(1), store.ReadActiveBatch()!.ArchiveId), null);
         await Write(folder, "fixture.json", new { scope = Scope, batch, approval, version, sample });
         await File.WriteAllTextAsync(Path.Combine(folder, "samples.jsonl"), JsonSerializer.Serialize(new { sample.SampleId }, LineJson) + "\n");
         return new(sample, reference, tested, store, version, batch, coordinator);

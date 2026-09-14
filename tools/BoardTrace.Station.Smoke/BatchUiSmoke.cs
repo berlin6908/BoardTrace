@@ -12,6 +12,7 @@ using BoardTrace.Contracts;
 using BoardTrace.Station;
 using BoardTrace.Station.Core;
 using BoardTrace.Vision;
+using Microsoft.Data.Sqlite;
 
 namespace BoardTrace.Station.Smoke;
 
@@ -82,7 +83,44 @@ public static partial class Program
                 "Approval refresh skipped the separate online start gate.");
             await model.StartBatchCommand.ExecuteAsync(null);
             var firstSession = store.ReadActiveBatch()!.Session!;
-            Require(firstSession.OperatorId == actor.Id && model.RunCommand.CanExecute(null) && model.RunButtonText == "检测生产件", model.BatchNotice);
+            Require(firstSession.OperatorId == actor.Id && firstSession.ArchiveId == store.ReadActiveBatch()!.ArchiveId
+                && model.RunCommand.CanExecute(null) && model.RunButtonText == "检测生产件", model.BatchNotice);
+
+            var emptyOptions = options with { DatabasePath = Path.Combine(output, "batch-ui-second-empty.db") };
+            var emptyPersonnel = StationAuthentication.CreatePersonnelSession(fixture.Address);
+            var emptyActor = await StationAuthentication.LoginOperatorAsync(emptyPersonnel.Client,
+                new("batch-operator-1", BatchUiHttpFixture.Password));
+            await using (var emptyModel = new StationViewModel(emptyOptions, emptyActor, emptyPersonnel, false))
+            {
+                await emptyModel.InitializeAsync();
+                await emptyModel.RefreshBatchesCommand.ExecuteAsync(null);
+                await emptyModel.DownloadBatchCommand.ExecuteAsync(null);
+                Require(emptyModel.StartBatchCommand.CanExecute(null), "Second empty archive could not reach the real start request.");
+                await emptyModel.StartBatchCommand.ExecuteAsync(null);
+                var emptyStore = new LocalInspectionStore(emptyOptions.DatabasePath);
+                Require(emptyStore.ReadActiveBatch() is { Session: null } emptyBatch
+                    && emptyBatch.ArchiveId != firstSession.ArchiveId && !emptyModel.RunCommand.CanExecute(null)
+                    && emptyStore.ReadRecent().Count == 0 && fixture.BoundArchiveId == firstSession.ArchiveId,
+                    "Different empty local archive bypassed the bound batch start or created a Started record.");
+            }
+            var backupOptions = options with { DatabasePath = Path.Combine(output, "batch-ui-backed-up.db") };
+            using (var sourceDb = new SqliteConnection($"Data Source={options.DatabasePath}"))
+            using (var backupDb = new SqliteConnection($"Data Source={backupOptions.DatabasePath}"))
+            {
+                sourceDb.Open(); backupDb.Open(); sourceDb.BackupDatabase(backupDb);
+            }
+            var backupPersonnel = StationAuthentication.CreatePersonnelSession(fixture.Address);
+            var backupActor = await StationAuthentication.LoginOperatorAsync(backupPersonnel.Client,
+                new("batch-operator-1", BatchUiHttpFixture.Password));
+            await using (var backupModel = new StationViewModel(backupOptions, backupActor, backupPersonnel, false))
+            {
+                await backupModel.InitializeAsync();
+                Require(new LocalInspectionStore(backupOptions.DatabasePath).ReadActiveBatch()?.ArchiveId == firstSession.ArchiveId
+                    && backupModel.StartBatchCommand.CanExecute(null), "SQLite backup lost the bound local archive identity.");
+                await backupModel.StartBatchCommand.ExecuteAsync(null);
+                Require(new LocalInspectionStore(backupOptions.DatabasePath).ReadActiveBatch()?.Session?.ArchiveId == firstSession.ArchiveId
+                    && backupModel.RunCommand.CanExecute(null), "Restored original SQLite archive could not restart the same approved batch.");
+            }
             await SnapshotAsync(window, Path.Combine(output, "13-batch-approved-started.png"));
             model.ConstructedNormal = false;
             model.ProductId = "SIM-BATCH-PRODUCTION-ONLINE";
@@ -120,7 +158,8 @@ public static partial class Program
             Require(!model.RunCommand.CanExecute(null) && model.StartBatchCommand.CanExecute(null), "A new operator inherited the prior production authorization.");
             await model.StartBatchCommand.ExecuteAsync(null);
             var nextSession = store.ReadActiveBatch()!.Session!;
-            Require(nextSession.Id != firstSession.Id && nextSession.OperatorId == nextActor.Id, "Shift start reused the former operator's session.");
+            Require(nextSession.Id != firstSession.Id && nextSession.OperatorId == nextActor.Id
+                && nextSession.ArchiveId == firstSession.ArchiveId, "Shift start reused the former operator's session or changed its archive.");
             foreach (var sequence in new[] { 4, 5 })
             {
                 model.ProductId = $"SIM-BATCH-NEXT-SHIFT-{sequence}";
@@ -189,6 +228,7 @@ public static partial class Program
         private readonly Task loop;
         private readonly byte[] reference;
         private readonly Dictionary<string, BatchExecutionSession> sessions = [];
+        private Guid? archiveId;
         private FirstArticleApproval? approval;
         public volatile bool AllowUploads;
         public volatile BatchUiNetwork Mode;
@@ -197,6 +237,7 @@ public static partial class Program
         public PublishedRecipeVersion Version { get; }
         public ConcurrentDictionary<Guid, InspectionRecord> Records { get; } = [];
         public ConcurrentQueue<object> Requests { get; } = [];
+        public Guid? BoundArchiveId => archiveId;
 
         public BatchUiHttpFixture(string sampleId, byte[] reference)
         {
@@ -287,9 +328,13 @@ public static partial class Program
             {
                 var input = (await JsonSerializer.DeserializeAsync<StartBatchRequest>(request.InputStream, Json))!;
                 if (approval is null || input.StationId != Batch.StationId || input.RecipeBundleHash != Version.BundleHash) { context.Response.StatusCode = 409; return; }
+                if (input.ArchiveId == Guid.Empty) { context.Response.StatusCode = 400; return; }
+                if (archiveId is not null && archiveId != input.ArchiveId) { context.Response.StatusCode = 409; return; }
+                archiveId ??= input.ArchiveId;
                 if (!sessions.TryGetValue(user.Id, out var session))
                 {
-                    session = new(Guid.NewGuid(), Batch.Id, Batch.StationId, Version.BundleHash, approval.InspectionId, user.Id, user.DisplayName, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow.AddHours(1));
+                    session = new(Guid.NewGuid(), Batch.Id, Batch.StationId, Version.BundleHash, approval.InspectionId,
+                        user.Id, user.DisplayName, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow.AddHours(1), input.ArchiveId);
                     sessions.Add(user.Id, session);
                 }
                 await Reply(context, session, 201); return;

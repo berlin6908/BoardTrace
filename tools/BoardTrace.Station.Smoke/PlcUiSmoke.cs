@@ -35,6 +35,7 @@ public static partial class Program
         var state = Path.Combine(output, "simulator-state.db");
         var events = Path.Combine(output, "simulator-events.jsonl");
         Guid pendingFourthId = Guid.Empty;
+        Guid boundArchiveId = Guid.Empty;
         using var available = new TcpListener(IPAddress.Loopback, 0);
         available.Start();
         var port = ((IPEndPoint)available.LocalEndpoint).Port;
@@ -75,6 +76,10 @@ public static partial class Program
                 Require(model.StartBatchCommand.CanExecute(null), model.BatchNotice);
                 await model.StartBatchCommand.ExecuteAsync(null);
                 Require(model.RunCommand.CanExecute(null), "Online production session was not established.");
+                var startedBatch = new LocalInspectionStore(options.DatabasePath).ReadActiveBatch()!;
+                boundArchiveId = startedBatch.ArchiveId;
+                Require(boundArchiveId != Guid.Empty && startedBatch.Session?.ArchiveId == boundArchiveId,
+                    "Online PLC batch did not bind the durable local archive identity.");
                 model.PlcHost = "127.0.0.1";
                 model.PlcPort = port.ToString();
                 await SnapshotAsync(window, Path.Combine(output, "20-plc-ready.png"));
@@ -121,7 +126,8 @@ public static partial class Program
                 var store = new LocalInspectionStore(options.DatabasePath);
                 var original = store.Get(pendingFourthId)!;
                 Require(original is { Purpose: InspectionPurpose.Production, ProductionSequence: 4, ControllerSessionId: not null, TriggerSequence: > 0 }
-                    && store.ReadUnacknowledgedPlc()?.Record.Id == pendingFourthId,
+                    && store.ReadUnacknowledgedPlc()?.Record.Id == pendingFourthId
+                    && store.ReadActiveBatch()?.ArchiveId == boundArchiveId,
                     "Archive recovery did not find the fourth committed physical identity.");
                 archive.SelectedHistory = archive.History.Single(row => row.Id == pendingFourthId);
                 await archive.ViewHistoryCommand.ExecuteAsync(null);
@@ -179,7 +185,9 @@ public static partial class Program
                 Require(store.ReadUnacknowledgedPlc() is null && Production(store).Length == 4,
                     "Recovered ACK re-ran an image or left the original result pending before new login.");
                 await restarted.StartBatchCommand.ExecuteAsync(null);
-                Require(restarted.RunCommand.CanExecute(null), "New process did not require and obtain its own online batch start.");
+                Require(restarted.RunCommand.CanExecute(null)
+                    && store.ReadActiveBatch()?.Session?.ArchiveId == boundArchiveId,
+                    "New process did not require its own online start against the original archive.");
                 await SnapshotAsync(window, Path.Combine(output, "26-plc-new-shift-started.png"));
                 await RunScenarioAsync(restarted, "normal", 5, port, simulatorSamples, state, events, output);
                 await CheckProductionAsync(restarted, options.DatabasePath, fixture, 5, source.SampleId, reference, tested);

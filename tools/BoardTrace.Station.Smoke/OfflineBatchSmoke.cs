@@ -68,7 +68,9 @@ public static partial class Program
                 await model.StartBatchCommand.ExecuteAsync(null);
                 Require(model.RunCommand.CanExecute(null), "Online start did not grant bounded production.");
                 var active = new LocalInspectionStore(options.DatabasePath).ReadActiveBatch()!;
-                Require(active.Session?.OperatorId == actor.Id && new LocalInspectionStore(options.DatabasePath).ReadBatchResume()?.ProtectedPayload is { Length: > 0 },
+                Require(active.Session?.OperatorId == actor.Id && active.ArchiveId != Guid.Empty
+                    && active.Session.ArchiveId == active.ArchiveId
+                    && new LocalInspectionStore(options.DatabasePath).ReadBatchResume()?.ProtectedPayload is { Length: > 0 },
                     "Online start did not persist the original protected personnel session.");
                 await SnapshotAsync(window, Path.Combine(output, "01-online-start.png"));
                 fixture.Mode = BatchUiNetwork.Disconnected;
@@ -305,7 +307,8 @@ public static partial class Program
         {
             await model.InitializeAsync();
             var before = new LocalInspectionStore(context.Options.DatabasePath).ReadActiveBatch()!;
-            Require(before.Session?.Id == context.ExpectedSessionId && model.RunCommand.CanExecute(null),
+            Require(before.Session?.Id == context.ExpectedSessionId && before.Session.ArchiveId == before.ArchiveId
+                && model.RunCommand.CanExecute(null),
                 "Cold process reset the shift session or could not accept production.");
             model.ProductId = "OFFLINE-COLD-PROCESS";
             await model.RunCommand.ExecuteAsync(null);

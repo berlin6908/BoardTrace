@@ -41,7 +41,8 @@ internal static class OfflineBatchResume
         var batch = saved.Batch;
         var session = envelope.Session;
         StationAuthentication.RequireOperator(envelope.Operator);
-        if (batch.Session != session || session.OperatorId != envelope.Operator.Id || session.StationId != options.StationId ||
+        if (batch.Session != session || session.ArchiveId != batch.ArchiveId ||
+            session.OperatorId != envelope.Operator.Id || session.StationId != options.StationId ||
             batch.Status != BatchStatus.InProgress || batch.Approval is null ||
             session.IssuedAt > DateTimeOffset.UtcNow || session.ExpiresAt <= DateTimeOffset.UtcNow ||
             batch.AcceptedProductionCount >= batch.Batch.PlannedQuantity)

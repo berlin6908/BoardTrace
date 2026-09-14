@@ -169,20 +169,29 @@ public sealed partial class StationViewModel
 
     private async Task StartBatchAsync()
     {
-        var batch = activeBatch!.Batch;
+        var cached = activeBatch!;
+        var batch = cached.Batch;
         BatchNotice = "正在为当前操作员申请批次启动…";
         try
         {
             using var response = await operatorClient!.PostAsJsonAsync($"api/batches/{batch.Id}/execution-sessions",
-                new StartBatchRequest(StationId, batch.RecipeBundleHash), uploadCancellation.Token);
+                new StartBatchRequest(StationId, batch.RecipeBundleHash, cached.ArchiveId), uploadCancellation.Token);
             if (!response.IsSuccessStatusCode)
             {
                 var message = await response.Content.ReadAsStringAsync(uploadCancellation.Token);
+                if (response.Content.Headers.ContentType?.MediaType == "application/problem+json")
+                {
+                    using var problem = JsonDocument.Parse(message);
+                    if (problem.RootElement.TryGetProperty("title", out var title) && title.ValueKind == JsonValueKind.String)
+                        message = title.GetString()!;
+                }
                 throw new HttpRequestException(string.IsNullOrWhiteSpace(message) ? "中央未允许启动批次。" : message, null, response.StatusCode);
             }
             var session = await response.Content.ReadFromJsonAsync<BatchExecutionSession>(uploadCancellation.Token)
                 ?? throw new InvalidDataException("中央未返回生产授权。");
             if (session.OperatorId != currentOperator!.Id) throw new UnauthorizedAccessException("启动授权未对应当前操作员，请重新登录。");
+            if (session.ArchiveId != cached.ArchiveId)
+                throw new InvalidDataException("中央授权不属于当前本地批次档案，请恢复原工位数据库。");
             var protectedResume = OfflineBatchResume.Protect(options, currentOperator, personnelSession!, session);
             coordinator.StartBatch(session, protectedResume);
             await RefreshBatchStateAsync();

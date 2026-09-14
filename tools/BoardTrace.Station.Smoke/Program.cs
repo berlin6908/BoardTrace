@@ -83,6 +83,14 @@ public static partial class Program
             await VerifyOfflineBatchAsync(output);
             return;
         }
+        if (arguments.GetValueOrDefault("--scope") == "batch")
+        {
+            var batchOptions = new StationOptions("T05-SMOKE", Path.GetFullPath("data"),
+                Path.GetFullPath("training/manifests/inputs/validation.jsonl"), Path.Combine(output, "station.db"),
+                new Uri("http://127.0.0.1:1/"), Path.Combine(output, "offline-device.json"));
+            await VerifyBatchUiAsync(output, batchOptions);
+            return;
+        }
         if (arguments.GetValueOrDefault("--scope") == "offline-resume-child")
         {
             await VerifyOfflineResumeChildAsync(arguments["--context"]);
@@ -93,7 +101,7 @@ public static partial class Program
             await VerifyLiveSqlAsync(liveScope, arguments["--context"]);
             return;
         }
-        if (arguments.ContainsKey("--scope")) throw new ArgumentException("--scope supports plc, offline, live-sql-* or omission for the full smoke flow.");
+        if (arguments.ContainsKey("--scope")) throw new ArgumentException("--scope supports batch, plc, offline, live-sql-* or omission for the full smoke flow.");
         using (var previewClient = StationAuthentication.CreatePersonnelSession(new Uri("http://127.0.0.1:1/")))
         {
             var preview = new LoginWindow(previewClient, new StationOptions("STATION-01", Path.GetFullPath("data"),

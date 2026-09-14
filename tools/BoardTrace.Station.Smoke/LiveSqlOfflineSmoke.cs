@@ -86,7 +86,8 @@ public static partial class Program
                 $"Real SQL bundle download did not load the approved fixed batch: {model.BatchNotice}; recipe={model.RecipeNotice}; active={model.ActiveBatchNumber}/{model.ActiveRecipeIdentity}; canStart={model.StartBatchCommand.CanExecute(null)}");
             await model.StartBatchCommand.ExecuteAsync(null);
             var active = new LocalInspectionStore(options.DatabasePath).ReadActiveBatch()!;
-            Require(active.Session?.OperatorId == login.AuthenticatedUser!.Id && active.Session.ExpiresAt > DateTimeOffset.UtcNow
+            Require(active.Session?.OperatorId == login.AuthenticatedUser!.Id && active.ArchiveId != Guid.Empty
+                && active.Session.ArchiveId == active.ArchiveId && active.Session.ExpiresAt > DateTimeOffset.UtcNow
                 && new LocalInspectionStore(options.DatabasePath).ReadBatchResume()?.ProtectedPayload is { Length: > 0 }
                 && model.RunCommand.CanExecute(null), "Real SQL online start did not persist a usable bounded operator grant.");
             await SnapshotAsync(window, Path.Combine(context.Output, "01-real-sql-start.png"));
@@ -131,12 +132,23 @@ public static partial class Program
         foreach (var argument in new[] { typeof(Program).Assembly.Location, "--scope", "live-sql-child", "--context",
                      Path.Combine(context.Output, "live-context.json") }) start.ArgumentList.Add(argument);
         using var child = Process.Start(start) ?? throw new InvalidOperationException("Could not start live SQL cold-resume WPF child.");
+        var stdoutTask = child.StandardOutput.ReadToEndAsync();
+        var stderrTask = child.StandardError.ReadToEndAsync();
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(35));
-        await child.WaitForExitAsync(deadline.Token);
-        var stdout = await child.StandardOutput.ReadToEndAsync();
-        var stderr = await child.StandardError.ReadToEndAsync();
-        await File.WriteAllTextAsync(Path.Combine(context.Output, "child.stdout.log"), stdout);
-        await File.WriteAllTextAsync(Path.Combine(context.Output, "child.stderr.log"), stderr);
+        try { await child.WaitForExitAsync(deadline.Token); }
+        catch (OperationCanceledException) when (deadline.IsCancellationRequested)
+        {
+            if (!child.HasExited) child.Kill(entireProcessTree: true);
+            await child.WaitForExitAsync();
+            throw new TimeoutException("Live SQL cold-resume WPF child exceeded 35 seconds; see child logs.");
+        }
+        finally
+        {
+            await File.WriteAllTextAsync(Path.Combine(context.Output, "child.stdout.log"), await stdoutTask);
+            await File.WriteAllTextAsync(Path.Combine(context.Output, "child.stderr.log"), await stderrTask);
+        }
+        var stdout = await stdoutTask;
+        var stderr = await stderrTask;
         Require(child.ExitCode == 0, "Live SQL cold-resume WPF child failed: " + stderr + stdout);
         var childProduct = JsonSerializer.Deserialize<LiveSqlProduct>(await File.ReadAllTextAsync(Path.Combine(context.Output, "child-product.json")), LiveJson)!;
         Require(childProduct.ProcessId == child.Id && childProduct.ProcessId != Environment.ProcessId

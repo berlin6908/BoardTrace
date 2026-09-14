@@ -7,7 +7,7 @@ namespace BoardTrace.Station.Core;
 public sealed class InspectionRejectedException(string message) : InvalidOperationException(message);
 
 public sealed record CachedBatchState(BatchDefinition Batch, BatchStatus Status, FirstArticleApproval? Approval,
-    int NextProductionSequence, BatchExecutionSession? Session)
+    int NextProductionSequence, BatchExecutionSession? Session, Guid ArchiveId)
 {
     public int AcceptedProductionCount => NextProductionSequence - 1;
 }
@@ -34,6 +34,10 @@ public sealed partial class LocalInspectionStore
                 Slot INTEGER PRIMARY KEY CHECK(Slot=1),
                 BatchId TEXT NOT NULL REFERENCES CachedBatches(Id),
                 ExecutionSession TEXT
+            );
+            CREATE TABLE IF NOT EXISTS BatchArchives (
+                BatchId TEXT PRIMARY KEY REFERENCES CachedBatches(Id),
+                ArchiveId TEXT NOT NULL UNIQUE
             );
             CREATE TABLE IF NOT EXISTS OfflineBatchResume (
                 Slot INTEGER PRIMARY KEY CHECK(Slot=1) REFERENCES ActiveBatch(Slot) ON DELETE CASCADE,
@@ -93,16 +97,20 @@ public sealed partial class LocalInspectionStore
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
-            SELECT b.Document,b.Status,b.Approval,b.NextProductionSequence,a.ExecutionSession
-            FROM ActiveBatch a JOIN CachedBatches b ON b.Id=a.BatchId WHERE a.Slot=1;
+            SELECT b.Document,b.Status,b.Approval,b.NextProductionSequence,a.ExecutionSession,r.ArchiveId
+            FROM ActiveBatch a JOIN CachedBatches b ON b.Id=a.BatchId
+            LEFT JOIN BatchArchives r ON r.BatchId=b.Id WHERE a.Slot=1;
             """;
         using var reader = command.ExecuteReader();
-        return reader.Read() ? new CachedBatchState(
+        if (!reader.Read()) return null;
+        if (reader.IsDBNull(5)) throw new InvalidDataException("本地批次缺少执行档案身份，请恢复对应版本的原工位 SQLite 档案。");
+        return new CachedBatchState(
             JsonSerializer.Deserialize<BatchDefinition>(reader.GetString(0), Json)!,
             Enum.Parse<BatchStatus>(reader.GetString(1)),
             reader.IsDBNull(2) ? null : JsonSerializer.Deserialize<FirstArticleApproval>(reader.GetString(2), Json),
             reader.GetInt32(3),
-            reader.IsDBNull(4) ? null : JsonSerializer.Deserialize<BatchExecutionSession>(reader.GetString(4), Json)) : null;
+            reader.IsDBNull(4) ? null : JsonSerializer.Deserialize<BatchExecutionSession>(reader.GetString(4), Json),
+            Guid.Parse(reader.GetString(5)));
     }
 
     // Call only with the complete recipe already loaded and verified by LocalRecipeStore.
@@ -124,7 +132,7 @@ public sealed partial class LocalInspectionStore
             throw new InspectionRejectedException("当前工位已有未关闭批次，不能切换。");
         using var existing = connection.CreateCommand();
         existing.Transaction = transaction;
-        existing.CommandText = "SELECT Document,Status,Approval FROM CachedBatches WHERE Id=$id;";
+        existing.CommandText = "SELECT b.Document,b.Status,b.Approval,r.ArchiveId FROM CachedBatches b LEFT JOIN BatchArchives r ON r.BatchId=b.Id WHERE b.Id=$id;";
         existing.Parameters.AddWithValue("$id", batch.Id.ToString());
         BatchStatus? previousStatus = null;
         FirstArticleApproval? previousApproval = null;
@@ -132,6 +140,7 @@ public sealed partial class LocalInspectionStore
         {
             if (reader.Read())
             {
+                if (reader.IsDBNull(3)) throw new InvalidDataException("本地批次缺少执行档案身份，请恢复对应版本的原工位 SQLite 档案。");
                 if (JsonSerializer.Deserialize<BatchDefinition>(reader.GetString(0), Json) != batch)
                     throw new InspectionRejectedException("批次的产品、数量、工位或方案已改变，不能替换本地批次。");
                 previousStatus = Enum.Parse<BatchStatus>(reader.GetString(1));
@@ -159,6 +168,15 @@ public sealed partial class LocalInspectionStore
         write.Parameters.AddWithValue("$status", status.ToString());
         write.Parameters.AddWithValue("$approval", savedApproval is null ? DBNull.Value : JsonSerializer.Serialize(savedApproval, Json));
         if (write.ExecuteNonQuery() != 1) throw new InspectionRejectedException("完整方案尚未缓存，不能启用批次。");
+        if (previousStatus is null)
+        {
+            using var archive = connection.CreateCommand();
+            archive.Transaction = transaction;
+            archive.CommandText = "INSERT INTO BatchArchives(BatchId,ArchiveId) VALUES($batch,$archive);";
+            archive.Parameters.AddWithValue("$batch", batch.Id.ToString());
+            archive.Parameters.AddWithValue("$archive", Guid.NewGuid().ToString());
+            archive.ExecuteNonQuery();
+        }
         using var select = connection.CreateCommand();
         select.Transaction = transaction;
         select.CommandText = """
@@ -184,7 +202,7 @@ public sealed partial class LocalInspectionStore
         using var transaction = connection.BeginTransaction();
         RequireNoUnacknowledgedPlc(connection, transaction);
         var active = ReadActiveBatch(connection, transaction) ?? throw new InspectionRejectedException("尚未加载批次。");
-        if (active.Batch.Id != session.BatchId || active.Batch.StationId != session.StationId ||
+        if (active.ArchiveId != session.ArchiveId || active.Batch.Id != session.BatchId || active.Batch.StationId != session.StationId ||
             active.Batch.RecipeBundleHash != session.RecipeBundleHash || active.Approval?.InspectionId != session.FirstArticleInspectionId ||
             active.Status is not (BatchStatus.Approved or BatchStatus.InProgress))
             throw new InspectionRejectedException("启动会话与批次、方案或首件批准不一致。");
@@ -293,7 +311,7 @@ public sealed partial class LocalInspectionStore
                 var session = active.Session;
                 if (active.Status != BatchStatus.InProgress || active.Approval is null || session is null)
                     throw new InspectionRejectedException("批次须完成首件批准并在线启动后才能生产。");
-                if (session.OperatorId != record.OperatorId || session.BatchId != batch.Id || session.StationId != record.StationId ||
+                if (session.ArchiveId != active.ArchiveId || session.OperatorId != record.OperatorId || session.BatchId != batch.Id || session.StationId != record.StationId ||
                     session.RecipeBundleHash != loadedBundleHash || session.FirstArticleInspectionId != active.Approval.InspectionId)
                     throw new InspectionRejectedException("当前操作员或方案不属于已启动批次会话。");
                 if (record.StartedAt < session.IssuedAt || record.StartedAt >= session.ExpiresAt)

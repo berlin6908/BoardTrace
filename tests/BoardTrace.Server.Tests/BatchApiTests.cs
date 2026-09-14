@@ -20,6 +20,65 @@ namespace BoardTrace.Server.Tests;
 
 public sealed class BatchApiTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task StartedBatchRejectsAnotherArchiveEvenBeforeAnyProductionWasUploaded(bool uploadProduction)
+    {
+        await using var server = await BatchServer.CreateAsync();
+        var batch = await server.CreateBatch();
+        var first = server.Record(batch, InspectionPurpose.FirstArticle);
+        await server.Upload(first);
+        await server.Status(server.Quality.PutAsJsonAsync($"/api/batches/{batch.Batch.Id}/first-article-approval",
+            new ApproveFirstArticleRequest(first.Id)), HttpStatusCode.Created);
+        var archiveId = Guid.NewGuid();
+        var request = new { StationId = "STATION-A", RecipeBundleHash = server.Version.BundleHash, ArchiveId = archiveId };
+        using var start = await server.Operator.PostAsJsonAsync($"/api/batches/{batch.Batch.Id}/execution-sessions", request);
+        Assert.Equal(HttpStatusCode.Created, start.StatusCode);
+        var originalSession = (await start.Content.ReadFromJsonAsync<BatchExecutionSession>())!;
+        if (uploadProduction)
+            await server.Upload(server.Record(batch, InspectionPurpose.Production) with
+            {
+                ExecutionSessionId = originalSession.Id, ProductionSequence = 1,
+                StartedAt = originalSession.IssuedAt, CompletedAt = originalSession.IssuedAt.AddMilliseconds(1)
+            });
+        using var emptyArchive = await server.Operator.PostAsJsonAsync($"/api/batches/{batch.Batch.Id}/execution-sessions",
+            request with { ArchiveId = Guid.NewGuid() });
+        Assert.Equal(HttpStatusCode.Conflict, emptyArchive.StatusCode);
+        Assert.Contains("SQLite", await emptyArchive.Content.ReadAsStringAsync());
+        await server.Login(server.Operator, "operator-2");
+        using var nextShift = await server.Operator.PostAsJsonAsync($"/api/batches/{batch.Batch.Id}/execution-sessions", request);
+        Assert.Equal(HttpStatusCode.Created, nextShift.StatusCode);
+        var nextSession = (await nextShift.Content.ReadFromJsonAsync<BatchExecutionSession>())!;
+        Assert.Equal("operator-2", nextSession.OperatorId);
+        Assert.NotEqual(originalSession.Id, nextSession.Id);
+    }
+
+    [Fact]
+    public async Task ConcurrentFirstStartsBindOnlyOneArchiveAndFailureRollsBackBinding()
+    {
+        await using var server = await BatchServer.CreateAsync();
+        var batch = await server.CreateBatch();
+        var first = server.Record(batch, InspectionPurpose.FirstArticle);
+        await server.Upload(first);
+        await server.Status(server.Quality.PutAsJsonAsync($"/api/batches/{batch.Batch.Id}/first-article-approval",
+            new ApproveFirstArticleRequest(first.Id)), HttpStatusCode.Created);
+        var requests = new[] { Guid.NewGuid(), Guid.NewGuid() }.Select(archiveId =>
+            new { StationId = "STATION-A", RecipeBundleHash = server.Version.BundleHash, ArchiveId = archiveId }).ToArray();
+        await server.Execute("CREATE TRIGGER dbo.RejectSession ON dbo.BatchExecutionSessions AFTER INSERT AS BEGIN THROW 51000, 'fixture session save failure', 1; END");
+        await server.Status(server.Operator.PostAsJsonAsync($"/api/batches/{batch.Batch.Id}/execution-sessions", requests[0] with { ArchiveId = Guid.NewGuid() }), HttpStatusCode.InternalServerError);
+        await server.Execute("DROP TRIGGER dbo.RejectSession");
+        var replies = await Task.WhenAll(requests.Select(request => server.Operator.PostAsJsonAsync($"/api/batches/{batch.Batch.Id}/execution-sessions", request)));
+        Assert.Single(replies, reply => reply.StatusCode == HttpStatusCode.Created);
+        Assert.Single(replies, reply => reply.StatusCode == HttpStatusCode.Conflict);
+        for (var index = 0; index < replies.Length; index++)
+        {
+            var expected = replies[index].IsSuccessStatusCode ? HttpStatusCode.OK : HttpStatusCode.Conflict;
+            await server.Status(server.Operator.PostAsJsonAsync($"/api/batches/{batch.Batch.Id}/execution-sessions", requests[index]), expected);
+            replies[index].Dispose();
+        }
+    }
+
     [Fact]
     public async Task CreationIsIdempotentAndStationAssignmentsAreExclusiveAndProtected()
     {
@@ -58,7 +117,7 @@ public sealed class BatchApiTests
     {
         await using var server = await BatchServer.CreateAsync();
         var batch = await server.CreateBatch();
-        await server.Status(server.Operator.PostAsJsonAsync($"/api/batches/{batch.Batch.Id}/execution-sessions", new StartBatchRequest("STATION-A", server.Version.BundleHash)), HttpStatusCode.Conflict);
+        await server.Status(server.Operator.PostAsJsonAsync($"/api/batches/{batch.Batch.Id}/execution-sessions", new StartBatchRequest("STATION-A", server.Version.BundleHash, server.ArchiveId)), HttpStatusCode.Conflict);
         var failed = server.Record(batch, InspectionPurpose.FirstArticle) with
         {
             ExecutionStatus = InspectionExecution.Failed, Decision = QualityDecision.NotEvaluated,
@@ -118,9 +177,9 @@ public sealed class BatchApiTests
         var first = server.Record(batch, InspectionPurpose.FirstArticle);
         await server.Upload(first);
         await server.Status(server.Quality.PutAsJsonAsync($"/api/batches/{batch.Batch.Id}/first-article-approval", new ApproveFirstArticleRequest(first.Id)), HttpStatusCode.Created);
-        await server.Status(server.Quality.PostAsJsonAsync($"/api/batches/{batch.Batch.Id}/execution-sessions", new StartBatchRequest("STATION-A", server.Version.BundleHash)), HttpStatusCode.Forbidden);
-        await server.Status(server.Operator.PostAsJsonAsync($"/api/batches/{batch.Batch.Id}/execution-sessions", new StartBatchRequest("STATION-B", server.Version.BundleHash)), HttpStatusCode.Conflict);
-        var starts = await Task.WhenAll(Enumerable.Range(0, 3).Select(_ => server.Operator.PostAsJsonAsync($"/api/batches/{batch.Batch.Id}/execution-sessions", new StartBatchRequest("STATION-A", server.Version.BundleHash))));
+        await server.Status(server.Quality.PostAsJsonAsync($"/api/batches/{batch.Batch.Id}/execution-sessions", new StartBatchRequest("STATION-A", server.Version.BundleHash, server.ArchiveId)), HttpStatusCode.Forbidden);
+        await server.Status(server.Operator.PostAsJsonAsync($"/api/batches/{batch.Batch.Id}/execution-sessions", new StartBatchRequest("STATION-B", server.Version.BundleHash, server.ArchiveId)), HttpStatusCode.Conflict);
+        var starts = await Task.WhenAll(Enumerable.Range(0, 3).Select(_ => server.Operator.PostAsJsonAsync($"/api/batches/{batch.Batch.Id}/execution-sessions", new StartBatchRequest("STATION-A", server.Version.BundleHash, server.ArchiveId))));
         Assert.Single(starts, response => response.StatusCode == HttpStatusCode.Created);
         var sessions = await Task.WhenAll(starts.Select(response => response.Content.ReadFromJsonAsync<BatchExecutionSession>()));
         foreach (var response in starts) response.Dispose();
@@ -173,7 +232,7 @@ public sealed class BatchApiTests
         await server.Status(server.Quality.PutAsJsonAsync($"/api/batches/{batch.Batch.Id}/first-article-approval",
             new ApproveFirstArticleRequest(first.Id)), HttpStatusCode.Created);
         using var start = await server.Operator.PostAsJsonAsync($"/api/batches/{batch.Batch.Id}/execution-sessions",
-            new StartBatchRequest("STATION-A", server.Version.BundleHash));
+            new StartBatchRequest("STATION-A", server.Version.BundleHash, server.ArchiveId));
         Assert.Equal(HttpStatusCode.Created, start.StatusCode);
         var session = (await start.Content.ReadFromJsonAsync<BatchExecutionSession>())!;
         var pending = server.Record(batch, InspectionPurpose.Production) with
@@ -198,6 +257,7 @@ public sealed class BatchApiTests
         private WebApplicationFactory<Program> factory = null!;
         public HttpClient Engineer = null!, Quality = null!, Operator = null!, Device = null!, OtherDevice = null!;
         public PublishedRecipeVersion Version = null!;
+        public Guid ArchiveId { get; } = Guid.NewGuid();
         public DateTimeOffset OperatorExpiresAt;
         private const string Master = "Server=(localdb)\\BoardTrace;Database=master;Integrated Security=true;TrustServerCertificate=true";
         private string Connection => $"Server=(localdb)\\BoardTrace;Database={database};Integrated Security=true;TrustServerCertificate=true";
@@ -223,7 +283,7 @@ public sealed class BatchApiTests
                 var roles = scope.ServiceProvider.GetRequiredService<RoleManager<IdentityRole>>();
                 var users = scope.ServiceProvider.GetRequiredService<UserManager<BoardTraceUser>>();
                 foreach (var role in new[] { "ProcessEngineer", "QualityEngineer", "Operator", "Station" }) Assert.True((await roles.CreateAsync(new(role))).Succeeded);
-                foreach (var (name, role, station) in new[] { ("engineer", "ProcessEngineer", (string?)null), ("quality", "QualityEngineer", (string?)null), ("operator", "Operator", (string?)null), ("station-a", "Station", "STATION-A"), ("station-b", "Station", "STATION-B") })
+                foreach (var (name, role, station) in new[] { ("engineer", "ProcessEngineer", (string?)null), ("quality", "QualityEngineer", (string?)null), ("operator", "Operator", (string?)null), ("operator-2", "Operator", (string?)null), ("station-a", "Station", "STATION-A"), ("station-b", "Station", "STATION-B") })
                 {
                     var user = new BoardTraceUser { Id = name, UserName = name, DisplayName = name, StationId = station };
                     Assert.True((await users.CreateAsync(user, "Test!Batch123")).Succeeded); Assert.True((await users.AddToRoleAsync(user, role)).Succeeded);
