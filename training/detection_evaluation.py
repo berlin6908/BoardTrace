@@ -12,6 +12,14 @@ from metrics import match, operating_point
 CLASS_NAMES = ("open", "short", "mousebite", "spur", "copper", "pin-hole")
 
 
+def deployment_predictions(defects, score_thresholds):
+    """Keep the deployment set in original order; class IDs are 1 through 6."""
+    thresholds = np.asarray(score_thresholds, dtype=float)
+    if thresholds.shape != (6,) or not np.all(np.isfinite(thresholds)) or np.any((thresholds < 0) | (thresholds > 1)):
+        raise ValueError("scoreThresholds must contain six finite values in [0, 1], in class order 1 through 6")
+    return [defect for defect in defects if defect["score"] >= thresholds[defect["classId"] - 1]]
+
+
 def _index_rows(rows, kind):
     indexed = {}
     for row in rows:
@@ -107,7 +115,7 @@ def evaluate_predictions(truth_rows, prediction_rows, evaluation_config):
     confusion = [[0] * (len(CLASS_NAMES) + 1) for _ in range(len(CLASS_NAMES) + 1)]
     failed_samples, predictions = [], {}
     threshold = evaluation_config["iouThreshold"]
-    confidence = evaluation_config["confidenceThreshold"]
+    score_thresholds = evaluation_config["scoreThresholds"]
     for sample_id, row in truths.items():
         prediction = rows[sample_id]
         if prediction["execution"] not in ("Completed", "Failed"):
@@ -118,8 +126,10 @@ def evaluate_predictions(truth_rows, prediction_rows, evaluation_config):
         else:
             defects = prediction["defects"]
         predictions[sample_id] = defects
+        # AP consumes the raw candidates above. Only deployment PR/confusion use this selection.
+        defects = deployment_predictions(defects, score_thresholds)
         truth_defects = row["defects"]
-        matched = match(defects, truth_defects, threshold, confidence, class_aware=True)
+        matched = match(defects, truth_defects, threshold, confidence=0, class_aware=True)
         for _, truth_index in matched["matches"]:
             counts[truth_defects[truth_index]["classId"] - 1][0] += 1
         for prediction_index in matched["falsePositives"]:
@@ -127,7 +137,7 @@ def evaluate_predictions(truth_rows, prediction_rows, evaluation_config):
         for truth_index in matched["falseNegatives"]:
             counts[truth_defects[truth_index]["classId"] - 1][2] += 1
 
-        geometry = match(defects, truth_defects, threshold, confidence, class_aware=False)
+        geometry = match(defects, truth_defects, threshold, confidence=0, class_aware=False)
         for prediction_index, truth_index in geometry["matches"]:
             confusion[truth_defects[truth_index]["classId"]][defects[prediction_index]["classId"]] += 1
         for prediction_index in geometry["falsePositives"]:
@@ -148,7 +158,7 @@ def evaluate_predictions(truth_rows, prediction_rows, evaluation_config):
             "rowAxis": "truth", "columnAxis": "prediction", "matrix": confusion},
         "protocol": {"version": evaluation_config["protocolVersion"],
             "operatingPointMatching": "class-aware, descending score, one-to-one, largest IoU",
-            "iouThreshold": threshold, "confidenceThreshold": confidence,
+            "iouThreshold": threshold, "scoreThresholds": list(score_thresholds),
             "confusionMatching": "class-agnostic geometry at the operating point",
             "apImplementation": "pycocotools.COCOeval bbox",
             "mapIoUThresholds": list(evaluation_config["mapIoUThresholds"]),

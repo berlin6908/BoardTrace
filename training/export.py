@@ -12,7 +12,7 @@ import torch
 from torchvision.ops import boxes as box_ops
 
 from dataset import DeepPcbDataset
-from detection_evaluation import CLASS_NAMES, evaluate_predictions
+from detection_evaluation import CLASS_NAMES, deployment_predictions, evaluate_predictions
 from metrics import match
 from model import OnnxDetector, build_model
 from train import write_json
@@ -31,6 +31,8 @@ def export(args):
         raise ValueError("Export output directory must be empty")
     torch.set_num_threads(4)
     state = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+    protocol = state["identity"]["evaluationProtocol"]
+    score_thresholds = np.asarray(protocol["scoreThresholds"])
     for filename in ("model.py", "dataset.py"):
         current_hash = hashlib.sha256(Path(__file__).with_name(filename).read_bytes()).hexdigest()
         if state["identity"]["sourceSha256"][filename] != current_hash:
@@ -53,7 +55,6 @@ def export(args):
     options.intra_op_num_threads = 4
     session = ort.InferenceSession(str(model_path), sess_options=options, providers=["CPUExecutionProvider"])
     comparisons, reference_predictions, onnx_predictions = [], [], []
-    protocol = state["identity"]["evaluationProtocol"]
     for index, sample in enumerate(dataset.rows):
         inputs = dataset.load_image(index).unsqueeze(0)
         with torch.inference_mode():
@@ -65,12 +66,12 @@ def export(args):
             np.testing.assert_array_equal(expected[1], actual[1])
             np.testing.assert_allclose(expected[0], actual[0], atol=0.1, rtol=1e-4)
             np.testing.assert_allclose(expected[2], actual[2], atol=1e-4, rtol=1e-3)
-            np.testing.assert_array_equal(expected[2] >= protocol["confidenceThreshold"],
-                                          actual[2] >= protocol["confidenceThreshold"])
-            reference_matches = match(reference_row["defects"], dataset.truths[index]["defects"],
-                protocol["iouThreshold"], protocol["confidenceThreshold"])
-            actual_matches = match(onnx_row["defects"], dataset.truths[index]["defects"],
-                protocol["iouThreshold"], protocol["confidenceThreshold"])
+            np.testing.assert_array_equal(expected[2] >= score_thresholds[expected[1] - 1],
+                                          actual[2] >= score_thresholds[actual[1] - 1])
+            reference_matches = match(deployment_predictions(reference_row["defects"], protocol["scoreThresholds"]),
+                dataset.truths[index]["defects"], protocol["iouThreshold"], confidence=0)
+            actual_matches = match(deployment_predictions(onnx_row["defects"], protocol["scoreThresholds"]),
+                dataset.truths[index]["defects"], protocol["iouThreshold"], confidence=0)
             assert reference_matches == actual_matches, "Deployment matching differs"
         except AssertionError as error:
             write_json(args.output / "comparison-failure.json", {"sampleId": sample["sampleId"],
@@ -101,7 +102,7 @@ def export(args):
             "normalization": "each channel (value - 0.5) / 0.5 inside model; do not apply it twice"},
         "outputs": {"boxes": "float32 Nx4 continuous xyxy pixels", "labels": "int64 N class IDs", "scores": "float32 N"},
         "classes": {str(index): name for index, name in enumerate(CLASS_NAMES, 1)},
-        "postprocessing": {"nms": "inside ONNX", "confidenceThreshold": state["identity"]["evaluationProtocol"]["confidenceThreshold"],
+        "postprocessing": {"nms": "inside ONNX", "scoreThresholds": protocol["scoreThresholds"],
             "confidenceComparison": ">=", "modelScoreFloor": 0.001, "maximumDetections": 100},
         "opset": 17, "onnxruntime": ort.__version__, "verificationSplit": "validation",
         "verificationSamples": len(comparisons), "qualityApproved": False,
