@@ -3,13 +3,14 @@ import json
 import hashlib
 from pathlib import Path
 import subprocess
+import shutil
 
 import cv2
 import numpy as np
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-DOTNET = ROOT / ".local/dotnet/dotnet.exe"
+DOTNET = shutil.which("dotnet")
 EVALUATOR = ROOT / "tools/BoardTrace.Evaluate/bin/Release/net10.0/BoardTrace.Evaluate.dll"
 
 
