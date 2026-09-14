@@ -27,22 +27,57 @@ def test_pretrained_training_optimizer_can_resume_without_downloading_weights():
 
 
 def test_joint_flips_keep_training_box_on_the_image_defect(tmp_path):
-    image = np.zeros((640, 640, 3), dtype=np.uint8)
-    image[20:40, 10:30] = 255
+    reference = np.zeros((640, 640), dtype=np.uint8)
+    reference[20:40, 10:30] = 255
+    image = reference.copy()
+    image[20:40, 10:30] = 0
     cv2.imwrite(str(tmp_path / "image.png"), image)
+    cv2.imwrite(str(tmp_path / "reference.png"), reference)
     for directory in ("inputs", "truth"):
         (tmp_path / directory).mkdir()
     (tmp_path / "inputs/train.jsonl").write_text(json.dumps({"sampleId": "example", "image": "image.png",
-        "imageSha256": hashlib.sha256((tmp_path / "image.png").read_bytes()).hexdigest()}), encoding="utf-8")
+        "imageSha256": hashlib.sha256((tmp_path / "image.png").read_bytes()).hexdigest(),
+        "reference": "reference.png", "referenceSha256": hashlib.sha256((tmp_path / "reference.png").read_bytes()).hexdigest()}), encoding="utf-8")
     (tmp_path / "truth/train.jsonl").write_text(json.dumps({"sampleId": "example", "defects": [{"box": [10, 20, 30, 40], "classId": 1}]}), encoding="utf-8")
     dataset = DeepPcbDataset(tmp_path, tmp_path, "train", horizontal_flip=1.0, vertical_flip=1.0)
     transformed, target = dataset[0]
     assert target["boxes"].tolist() == [[610, 600, 630, 620]]
-    assert transformed[:, 600:620, 610:630].min().item() == 1
-    assert transformed.sum().item() == 3 * 20 * 20
-    cv2.imwrite(str(tmp_path / "image.png"), np.zeros_like(image))
-    with pytest.raises(ValueError, match="differs from the pinned manifest"):
+    assert transformed.shape == (3, 640, 640)
+    assert transformed[0].sum().item() == 0
+    assert transformed[1, 600:620, 610:630].min().item() == 1
+    assert transformed[2, 600:620, 610:630].min().item() == 1
+    assert transformed[1].sum().item() == transformed[2].sum().item() == 20 * 20
+    cv2.imwrite(str(tmp_path / "reference.png"), np.zeros_like(reference))
+    with pytest.raises(ValueError, match="reference differs from the pinned manifest"):
         dataset.load_image(0)
+    cv2.imwrite(str(tmp_path / "reference.png"), reference)
+    cv2.imwrite(str(tmp_path / "image.png"), np.full_like(image, 1))
+    with pytest.raises(ValueError, match="image differs from the pinned manifest"):
+        dataset.load_image(0)
+
+
+def test_paired_input_preserves_gray_values_and_difference_direction(tmp_path):
+    tested = np.full((640, 640), 100, dtype=np.uint8)
+    reference = np.full((640, 640), 100, dtype=np.uint8)
+    tested[5, 6] = 200
+    reference[7, 8] = 220
+    cv2.imwrite(str(tmp_path / "test.png"), tested)
+    cv2.imwrite(str(tmp_path / "reference.png"), reference)
+    for directory in ("inputs", "truth"):
+        (tmp_path / directory).mkdir()
+    row = {"sampleId": "pair", "image": "test.png", "reference": "reference.png"}
+    row["imageSha256"] = hashlib.sha256((tmp_path / row["image"]).read_bytes()).hexdigest()
+    row["referenceSha256"] = hashlib.sha256((tmp_path / row["reference"]).read_bytes()).hexdigest()
+    (tmp_path / "inputs/train.jsonl").write_text(json.dumps(row), encoding="utf-8")
+    (tmp_path / "truth/train.jsonl").write_text(json.dumps({"sampleId": "pair", "defects": []}), encoding="utf-8")
+    channels = DeepPcbDataset(tmp_path, tmp_path, "train").load_image(0)
+    torch.testing.assert_close(channels[:, 5, 6], torch.tensor([200, 100, 100]).float() / 255)
+    torch.testing.assert_close(channels[:, 7, 8], torch.tensor([100, 220, 120]).float() / 255)
+    model = build_model(pretrained=False)
+    assert model.transform.image_mean == [0.5] * 3
+    assert model.transform.image_std == [0.5] * 3
+    assert model.backbone.body.conv1.weight.requires_grad
+    assert next(model.backbone.body.layer1.parameters()).requires_grad
 
 
 def test_training_dataset_rejects_final_test_before_reading_any_manifest(tmp_path):

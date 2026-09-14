@@ -250,6 +250,14 @@
         "type": "Transitive",
         "resolved": "9.0.4",
         "contentHash": "o94k2RKuAce3GeDMlUvIXlhVa1kWpJw95E6C9LwW0KlG0nj5+SgCiIxJ2Eroqb9sLtG1mEMbFttZIBZ13EJPvQ=="
+      },
+      "boardtrace.vision": {
+        "type": "Project",
+        "dependencies": {
+          "Microsoft.ML.OnnxRuntime": "[1.22.1, )",
+          "OpenCvSharp4": "[4.13.0.20260627, )",
+          "OpenCvSharp4.runtime.win": "[4.13.0.20260627, )"
+        }
       }
     }
   }

@@ -15,9 +15,10 @@ def build_model(pretrained=False):
     # Keep identical normalization and trainable layers when restoring a checkpoint.
     # TorchVision's convenience factory changes both when weights=None.
     backbone = resnet_fpn_backbone(backbone_name="resnet50", weights=None,
-        norm_layer=partial(FrozenBatchNorm2d, eps=0.0), trainable_layers=3)
+        norm_layer=partial(FrozenBatchNorm2d, eps=0.0), trainable_layers=5)
     model = FasterRCNN(backbone, num_classes=91, min_size=640, max_size=640,
         box_score_thresh=0.001, box_detections_per_img=100,
+        image_mean=[0.5, 0.5, 0.5], image_std=[0.5, 0.5, 0.5],
     )
     if pretrained:
         model.load_state_dict(FasterRCNN_ResNet50_FPN_Weights.COCO_V1.get_state_dict(progress=True, check_hash=True))

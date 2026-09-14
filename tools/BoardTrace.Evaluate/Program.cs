@@ -6,18 +6,19 @@ using BoardTrace.Vision;
 
 var runWatch = Stopwatch.StartNew();
 if (args.Length == 0 || args.Length % 2 != 0)
-    throw new ArgumentException("--manifest <inputs.jsonl> --data-root <data> --output <predictions.jsonl> with --recipe <settings.json> or --model <onnx> --model-sha256 <sha> --score-threshold <0..1>");
+    throw new ArgumentException("--manifest <inputs.jsonl> --data-root <data> --output <predictions.jsonl> with --recipe <settings.json> or --model <onnx> --model-sha256 <sha> --score-thresholds <six comma-separated values in class order 1..6>");
 var options = args.Chunk(2).ToDictionary(pair => pair[0], pair => pair[1]);
+var knownOptions = new[] { "--manifest", "--data-root", "--output", "--recipe", "--model", "--model-sha256", "--score-thresholds" };
+if (options.Keys.Any(key => !knownOptions.Contains(key))) throw new ArgumentException("Unknown evaluation option.");
 var modelMode = options.ContainsKey("--model");
 if (modelMode == options.ContainsKey("--recipe"))
     throw new ArgumentException("Select exactly one of --recipe and --model.");
-if (!modelMode && (options.ContainsKey("--model-sha256") || options.ContainsKey("--score-threshold")))
-    throw new ArgumentException("--model-sha256 and --score-threshold require --model.");
-if (modelMode && (!options.ContainsKey("--model-sha256") || !options.ContainsKey("--score-threshold")))
-    throw new ArgumentException("--model requires --model-sha256 and --score-threshold.");
-var scoreThreshold = modelMode ? double.Parse(options["--score-threshold"], CultureInfo.InvariantCulture) : 0;
-if (!double.IsFinite(scoreThreshold) || scoreThreshold is < 0 or > 1)
-    throw new ArgumentException("--score-threshold must be between 0 and 1.");
+if (!modelMode && (options.ContainsKey("--model-sha256") || options.ContainsKey("--score-thresholds")))
+    throw new ArgumentException("--model-sha256 and --score-thresholds require --model.");
+if (modelMode && (!options.ContainsKey("--model-sha256") || !options.ContainsKey("--score-thresholds")))
+    throw new ArgumentException("--model requires --model-sha256 and --score-thresholds.");
+var scoreThresholds = modelMode ? OnnxScoreThresholds.FromClassOrder(options["--score-thresholds"].Split(',')
+    .Select(value => double.Parse(value, CultureInfo.InvariantCulture)).ToArray()) : null;
 var json = new JsonSerializerOptions(JsonSerializerDefaults.Web);
 var initializationWatch = Stopwatch.StartNew();
 using var onnx = modelMode ? new OnnxDetector(options["--model"], options["--model-sha256"]) : null;
@@ -40,17 +41,16 @@ await using (var output = new StreamWriter(temporaryPath))
         try
         {
             var tested = await File.ReadAllBytesAsync(Path.Combine(options["--data-root"], input.Image));
+            var reference = await File.ReadAllBytesAsync(Path.Combine(options["--data-root"],
+                input.Reference ?? throw new InvalidDataException("Input requires a reference image.")));
             DetectionResult result;
             if (onnx is not null)
-                result = onnx.Detect(tested, scoreThreshold);
+                result = onnx.Detect(tested, reference, scoreThresholds!);
             else
-            {
-                var reference = await File.ReadAllBytesAsync(Path.Combine(options["--data-root"],
-                    input.Reference ?? throw new InvalidDataException("Classical input requires a reference image.")));
                 result = classical!.Detect(tested, reference);
-            }
             row = new { input.SampleId, execution = "Completed", result.Decision, result.Defects, result.ElapsedMs, result.Diagnostics,
-                imageSha256 = Convert.ToHexStringLower(SHA256.HashData(tested)) };
+                imageSha256 = Convert.ToHexStringLower(SHA256.HashData(tested)),
+                referenceSha256 = Convert.ToHexStringLower(SHA256.HashData(reference)) };
             completed++;
         }
         catch (Exception exception) when (exception is IOException or InvalidDataException or OpenCvSharp.OpenCVException or ArgumentException)
@@ -65,6 +65,7 @@ await using (var output = new StreamWriter(temporaryPath))
 File.Move(temporaryPath, outputPath, overwrite: true);
 Console.WriteLine(JsonSerializer.Serialize(new { completed, failures, outputPath, detectorInitializationMs,
     sessionInitializationMs = onnx?.SessionInitializationMs, modelSha256 = onnx?.ModelSha256,
+    scoreThresholds = scoreThresholds?.ToClassOrder(),
     totalElapsedMs = runWatch.Elapsed.TotalMilliseconds }, json));
 
 internal sealed record ReplayInput(string SampleId, string Image, string? Reference);
