@@ -88,7 +88,12 @@ public static partial class Program
             await VerifyOfflineResumeChildAsync(arguments["--context"]);
             return;
         }
-        if (arguments.ContainsKey("--scope")) throw new ArgumentException("--scope supports plc, offline, offline-resume-child or omission for the full smoke flow.");
+        if (arguments.GetValueOrDefault("--scope") is { } liveScope && liveScope.StartsWith("live-sql-", StringComparison.Ordinal))
+        {
+            await VerifyLiveSqlAsync(liveScope, arguments["--context"]);
+            return;
+        }
+        if (arguments.ContainsKey("--scope")) throw new ArgumentException("--scope supports plc, offline, live-sql-* or omission for the full smoke flow.");
         using (var previewClient = StationAuthentication.CreatePersonnelSession(new Uri("http://127.0.0.1:1/")))
         {
             var preview = new LoginWindow(previewClient, new StationOptions("STATION-01", Path.GetFullPath("data"),
