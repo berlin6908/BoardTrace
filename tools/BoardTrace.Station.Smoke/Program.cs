@@ -73,6 +73,11 @@ public static partial class Program
 
     private static async Task RunAsync(string output, Dictionary<string, string> arguments)
     {
+        if (arguments.GetValueOrDefault("--scope") is "rework-live" or "rework-live-verify")
+        {
+            await VerifyReworkLiveAsync(arguments["--scope"], arguments["--context"], output);
+            return;
+        }
         if (arguments.GetValueOrDefault("--scope") == "plc")
         {
             await VerifyPlcUiAsync(output);
@@ -101,7 +106,7 @@ public static partial class Program
             await VerifyLiveSqlAsync(liveScope, arguments["--context"]);
             return;
         }
-        if (arguments.ContainsKey("--scope")) throw new ArgumentException("--scope supports batch, plc, offline, live-sql-* or omission for the full smoke flow.");
+        if (arguments.ContainsKey("--scope")) throw new ArgumentException("--scope supports batch, plc, offline, live-sql-*, rework-live, rework-live-verify or omission for the full smoke flow.");
         using (var previewClient = StationAuthentication.CreatePersonnelSession(new Uri("http://127.0.0.1:1/")))
         {
             var preview = new LoginWindow(previewClient, new StationOptions("STATION-01", Path.GetFullPath("data"),

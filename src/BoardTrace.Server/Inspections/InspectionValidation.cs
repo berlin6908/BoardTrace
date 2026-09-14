@@ -9,6 +9,8 @@ public static class InspectionValidation
     {
         if (id == Guid.Empty || record.Id != id) return "路径编号必须与检测档案编号一致。";
         if (!Enum.IsDefined(record.Purpose)) return "检测用途无效。";
+        if (record.Purpose == InspectionPurpose.Reinspection ? record.ReworkOrderId is null || record.ReworkOrderId == Guid.Empty : record.ReworkOrderId is not null)
+            return "复检必须关联有效返工指令，其他检测用途不得携带返工指令。";
         if ((record.ControllerSessionId is null) != (record.TriggerSequence is null) ||
             record.ControllerSessionId == Guid.Empty || record.TriggerSequence == 0)
             return "PLC 会话与触发序号必须同时提供，且均非零。";

@@ -15,7 +15,7 @@ public static class BatchInspectionGate
         if (record.Purpose == InspectionPurpose.EngineeringReplay)
             return record.BatchId is null && record.ExecutionSessionId is null && record.ProductionSequence is null
                 ? null : "工程回放不能携带批次、执行会话或生产序号。";
-        if (record.BatchId is null) return "首件和生产检测必须绑定批次。";
+        if (record.BatchId is null) return "首件、生产和复检必须绑定批次。";
         var batch = await db.Batches.AsNoTracking().SingleOrDefaultAsync(batch => batch.Id == record.BatchId, token);
         if (batch is null || batch.StationId != record.StationId) return "批次不存在或不属于该工位。";
         if (record.RecipeId != batch.RecipeVersionId.ToString("D")) return "检测版本与批次固定版本不符。";
@@ -37,9 +37,21 @@ public static class BatchInspectionGate
             return approval is not null && record.StartedAt > approval.ApprovedAt ? "首件批准后不能再接受新的首件。" : null;
         }
         if (batch.Status is not (BatchStatus.InProgress or BatchStatus.Closed)) return "批次尚未启动生产。";
-        if (record.ProductionSequence is not int sequence || sequence < 1 || sequence > batch.PlannedQuantity) return "生产序号超出本批计划数量。";
+        if (record.Purpose == InspectionPurpose.Production &&
+            (record.ProductionSequence is not int sequence || sequence < 1 || sequence > batch.PlannedQuantity))
+            return "生产序号超出本批计划数量。";
+        if (record.Purpose == InspectionPurpose.Reinspection)
+        {
+            if (record.ProductionSequence is not null) return "复检不消耗生产序号。";
+            var order = await db.ReworkOrders.AsNoTracking().SingleOrDefaultAsync(order => order.Id == record.ReworkOrderId, token);
+            if (order is null || order.BatchId != batch.Id || order.StationId != record.StationId ||
+                order.ProductId != record.ProductId || order.SampleId != record.SampleId || order.RecipeVersionId != batch.RecipeVersionId ||
+                order.RecipeBundleHash != batch.RecipeBundleHash || record.StartedAt < order.CreatedAt)
+                return "复检必须使用原返工指令的批次、产品、样本、工位和方案，且接件时间不能早于指令。";
+        }
         var session = await db.BatchExecutionSessions.AsNoTracking().SingleOrDefaultAsync(session => session.Id == record.ExecutionSessionId, token);
         if (session is null || session.BatchId != batch.Id || session.StationId != record.StationId || session.RecipeBundleHash != batch.RecipeBundleHash ||
+            session.ArchiveId != batch.ArchiveId ||
             session.OperatorId != record.OperatorId || session.OperatorName != record.OperatorName || record.StartedAt < session.IssuedAt || record.StartedAt >= session.ExpiresAt)
             return "检测接受时间、人员或批次不符合历史执行会话。";
         return null;

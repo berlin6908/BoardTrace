@@ -18,7 +18,7 @@ using Microsoft.Extensions.Options;
 
 namespace BoardTrace.Server.Tests;
 
-public sealed class BatchApiTests
+public sealed partial class BatchApiTests
 {
     [Theory]
     [InlineData(false)]
@@ -283,7 +283,7 @@ public sealed class BatchApiTests
                 var roles = scope.ServiceProvider.GetRequiredService<RoleManager<IdentityRole>>();
                 var users = scope.ServiceProvider.GetRequiredService<UserManager<BoardTraceUser>>();
                 foreach (var role in new[] { "ProcessEngineer", "QualityEngineer", "Operator", "Station" }) Assert.True((await roles.CreateAsync(new(role))).Succeeded);
-                foreach (var (name, role, station) in new[] { ("engineer", "ProcessEngineer", (string?)null), ("quality", "QualityEngineer", (string?)null), ("operator", "Operator", (string?)null), ("operator-2", "Operator", (string?)null), ("station-a", "Station", "STATION-A"), ("station-b", "Station", "STATION-B") })
+                foreach (var (name, role, station) in new[] { ("engineer", "ProcessEngineer", (string?)null), ("quality", "QualityEngineer", (string?)null), ("quality-2", "QualityEngineer", (string?)null), ("operator", "Operator", (string?)null), ("operator-2", "Operator", (string?)null), ("station-a", "Station", "STATION-A"), ("station-b", "Station", "STATION-B") })
                 {
                     var user = new BoardTraceUser { Id = name, UserName = name, DisplayName = name, StationId = station };
                     Assert.True((await users.CreateAsync(user, "Test!Batch123")).Succeeded); Assert.True((await users.AddToRoleAsync(user, role)).Succeeded);

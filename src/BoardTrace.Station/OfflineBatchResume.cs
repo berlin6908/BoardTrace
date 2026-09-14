@@ -45,7 +45,7 @@ internal static class OfflineBatchResume
             session.OperatorId != envelope.Operator.Id || session.StationId != options.StationId ||
             batch.Status != BatchStatus.InProgress || batch.Approval is null ||
             session.IssuedAt > DateTimeOffset.UtcNow || session.ExpiresAt <= DateTimeOffset.UtcNow ||
-            batch.AcceptedProductionCount >= batch.Batch.PlannedQuantity)
+            (batch.AcceptedProductionCount >= batch.Batch.PlannedQuantity && !saved.HasPendingRework))
             throw new InvalidOperationException("原批次人员授权已结束或当前批次不能继续，请在线登录。");
         return new ResumeCandidate(batch, envelope);
     }

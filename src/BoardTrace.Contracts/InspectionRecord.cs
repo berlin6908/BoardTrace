@@ -9,7 +9,7 @@ public enum InspectionExecution { Started, Completed, Failed, Interrupted }
 public enum QualityDecision { NotEvaluated, Pass, Fail }
 
 [JsonConverter(typeof(JsonStringEnumConverter<InspectionPurpose>))]
-public enum InspectionPurpose { EngineeringReplay, FirstArticle, Production }
+public enum InspectionPurpose { EngineeringReplay, FirstArticle, Production, Reinspection }
 
 public readonly record struct InspectionIdentity(Guid ControllerSessionId, uint TriggerSequence);
 
@@ -23,6 +23,7 @@ public sealed record InspectionRecord
     public required InspectionPurpose Purpose { get; init; }
     public Guid? BatchId { get; init; }
     public Guid? ExecutionSessionId { get; init; }
+    public Guid? ReworkOrderId { get; init; }
     public int? ProductionSequence { get; init; }
     public Guid? ControllerSessionId { get; init; }
     public uint? TriggerSequence { get; init; }

@@ -29,7 +29,8 @@ public sealed record InspectionRow(StoredInspection Stored)
     public string Upload => Stored.PendingUpload ? "待上传" : Stored.AcknowledgedAt is not null ? "已确认" : "未生成结果";
     public string Purpose => Stored.Record.Purpose switch
     {
-        InspectionPurpose.FirstArticle => "首件", InspectionPurpose.Production => $"生产 #{Stored.Record.ProductionSequence}", _ => "工程回放"
+        InspectionPurpose.FirstArticle => "首件", InspectionPurpose.Production => $"生产 #{Stored.Record.ProductionSequence}",
+        InspectionPurpose.Reinspection => "返工复检", _ => "工程回放"
     };
 }
 
@@ -84,11 +85,13 @@ public sealed partial class StationViewModel : ObservableObject, IAsyncDisposabl
         SignOutCommand = new AsyncRelayCommand(SignOutAsync, () => !stopping && !signingOut);
         InitializeRecipeCommands();
         InitializeBatchCommands();
+        InitializeReworkCommands();
         InitializePlcCommands();
         RunCommand.PropertyChanged += (_, e) =>
         {
             if (e.PropertyName != nameof(RunCommand.IsRunning)) return;
             OnPropertyChanged(nameof(CanEdit));
+            NotifyReworkCommands();
             ViewHistoryCommand.NotifyCanExecuteChanged();
             NotifyRecipeCommands();
             NotifyBatchCommands();
@@ -97,6 +100,7 @@ public sealed partial class StationViewModel : ObservableObject, IAsyncDisposabl
         {
             if (e.PropertyName != nameof(ViewHistoryCommand.IsRunning)) return;
             OnPropertyChanged(nameof(CanEdit));
+            NotifyReworkCommands();
             RunCommand.NotifyCanExecuteChanged();
             NotifyRecipeCommands();
             NotifyBatchCommands();
@@ -109,7 +113,7 @@ public sealed partial class StationViewModel : ObservableObject, IAsyncDisposabl
     public string SessionButtonText => currentOperator is null ? "登录人员" : "退出 / 换班";
     private bool CanViewHistory => archiveReady && !stopping && !signingOut && !plcInspecting && !RunCommand.IsRunning && !ViewHistoryCommand.IsRunning;
     public string OperatorName => currentOperator?.DisplayName ?? "未登录";
-    public bool CanEdit => !stopping && !signingOut && !sessionExpired && currentOperator != null && ready && !plcInspecting && !plcWaitingAck && !RunCommand.IsRunning && !ViewHistoryCommand.IsRunning && !IsRecipeBusy && !IsBatchBusy;
+    public bool CanEdit => !stopping && !signingOut && !sessionExpired && currentOperator != null && ready && !plcInspecting && !plcWaitingAck && !RunCommand.IsRunning && !ViewHistoryCommand.IsRunning && !IsRecipeBusy && !IsBatchBusy && !IsReworkBusy;
     public ObservableCollection<ReplaySample> Samples { get; } = [];
     public ObservableCollection<InspectionRow> History { get; } = [];
     public ObservableCollection<string> Events { get; } = [];
@@ -149,7 +153,7 @@ public sealed partial class StationViewModel : ObservableObject, IAsyncDisposabl
     };
     public string DefectCount => current?.ExecutionStatus == InspectionExecution.Completed ? current.Defects.Count.ToString() : "—";
     public string DetectionTime => current?.DetectionMs is double ms ? $"{ms:F1} ms" : "—";
-    public string ResultCaption => current is null ? "尚未选择检测档案" : $"{current.ProductId} · {(current.Purpose == InspectionPurpose.FirstArticle ? "首件" : current.Purpose == InspectionPurpose.Production ? $"生产 #{current.ProductionSequence}" : "工程回放")} · 样本 {current.SampleId} · {(current.SourceKind == "ConstructedNormal" ? "构造正常输入" : "数据集回放")} · 操作员 {current.OperatorName}";
+    public string ResultCaption => current is null ? "尚未选择检测档案" : $"{current.ProductId} · {(current.Purpose == InspectionPurpose.FirstArticle ? "首件" : current.Purpose == InspectionPurpose.Production ? $"生产 #{current.ProductionSequence}" : current.Purpose == InspectionPurpose.Reinspection ? "返工复检" : "工程回放")} · 样本 {current.SampleId} · {(current.SourceKind == "ConstructedNormal" ? "构造正常输入" : "数据集回放")} · 操作员 {current.OperatorName}";
     public string InspectionId => current?.Id.ToString() ?? "等待检测";
 
     public static string DecisionLabel(QualityDecision decision) => decision switch
@@ -238,7 +242,7 @@ public sealed partial class StationViewModel : ObservableObject, IAsyncDisposabl
         var sample = SelectedSample!;
         var product = ProductId.Trim();
         var source = CreateReplaySource(sample, ConstructedNormal);
-        var purpose = activeBatch is null ? InspectionPurpose.EngineeringReplay
+        var purpose = IsReinspectionMode ? InspectionPurpose.Reinspection : activeBatch is null ? InspectionPurpose.EngineeringReplay
             : activeBatch.Status == BatchStatus.AwaitingFirstArticle ? InspectionPurpose.FirstArticle : InspectionPurpose.Production;
         SelectedHistory = null;
         ShowRecord(null);
@@ -272,7 +276,7 @@ public sealed partial class StationViewModel : ObservableObject, IAsyncDisposabl
         AddEvent($"{product} · {Decision} · 本地提交成功。");
         try { await RefreshHistoryAsync(); }
         catch (Exception error) { Notice += " 档案列表刷新失败：" + error.Message; }
-        ProductId = $"SIM-{DateTime.Now:yyyyMMdd-HHmmssfff}";
+        if (!IsReinspectionMode) ProductId = $"SIM-{DateTime.Now:yyyyMMdd-HHmmssfff}";
         RunCommand.NotifyCanExecuteChanged();
     }
 
@@ -395,7 +399,8 @@ public sealed partial class StationViewModel : ObservableObject, IAsyncDisposabl
             RefreshRecipesCommand.ExecutionTask ?? Task.CompletedTask, DownloadRecipeCommand.ExecutionTask ?? Task.CompletedTask,
             LoadCachedRecipeCommand.ExecutionTask ?? Task.CompletedTask, RefreshBatchesCommand.ExecutionTask ?? Task.CompletedTask,
             DownloadBatchCommand.ExecutionTask ?? Task.CompletedTask, RefreshActiveBatchCommand.ExecutionTask ?? Task.CompletedTask,
-            StartBatchCommand.ExecutionTask ?? Task.CompletedTask);
+            StartBatchCommand.ExecutionTask ?? Task.CompletedTask, RefreshReworkOrdersCommand.ExecutionTask ?? Task.CompletedTask,
+            EnterReinspectionCommand.ExecutionTask ?? Task.CompletedTask, ExitReinspectionCommand.ExecutionTask ?? Task.CompletedTask);
         var sessionCleared = ClearLocalOperatorSession();
         try { await RefreshBatchStateAsync(); }
         catch (Exception error)
@@ -445,6 +450,7 @@ public sealed partial class StationViewModel : ObservableObject, IAsyncDisposabl
         SignOutCommand.NotifyCanExecuteChanged();
         NotifyRecipeCommands();
         NotifyBatchCommands();
+        NotifyReworkCommands();
         OnPropertyChanged(nameof(BatchStateText));
     }
 
@@ -462,7 +468,9 @@ public sealed partial class StationViewModel : ObservableObject, IAsyncDisposabl
                 SignOutCommand.ExecutionTask ?? Task.CompletedTask, RefreshRecipesCommand.ExecutionTask ?? Task.CompletedTask,
                 DownloadRecipeCommand.ExecutionTask ?? Task.CompletedTask, LoadCachedRecipeCommand.ExecutionTask ?? Task.CompletedTask,
                 RefreshBatchesCommand.ExecutionTask ?? Task.CompletedTask, DownloadBatchCommand.ExecutionTask ?? Task.CompletedTask,
-                RefreshActiveBatchCommand.ExecutionTask ?? Task.CompletedTask, StartBatchCommand.ExecutionTask ?? Task.CompletedTask);
+                RefreshActiveBatchCommand.ExecutionTask ?? Task.CompletedTask, StartBatchCommand.ExecutionTask ?? Task.CompletedTask,
+                RefreshReworkOrdersCommand.ExecutionTask ?? Task.CompletedTask, EnterReinspectionCommand.ExecutionTask ?? Task.CompletedTask,
+                ExitReinspectionCommand.ExecutionTask ?? Task.CompletedTask);
             if (uploadTask != null) await uploadTask;
         }
         finally
@@ -472,6 +480,7 @@ public sealed partial class StationViewModel : ObservableObject, IAsyncDisposabl
             personnelSession?.Dispose();
             uploadCancellation.Dispose();
             historyRefresh.Dispose();
+            batchRefresh.Dispose();
         }
     }
 

@@ -3,10 +3,13 @@ import { onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElAlert, ElButton, ElDrawer, ElEmpty, ElIcon, ElInput, ElOption, ElPagination, ElSelect, ElSkeleton, ElTable, ElTableColumn, ElTag } from 'element-plus'
 import { ArrowRight, Refresh, Search } from '@element-plus/icons-vue'
 import InspectionDetail from './components/InspectionDetail.vue'
+import QualityReview from './components/QualityReview.vue'
 import { ApiError, listInspections, requestError } from './api'
+import type { CurrentUser } from './api'
 import { decisionLabels, executionLabels, formatMs, formatTime, purposeLabels, sourceLabel } from './inspections'
-import type { Decision, InspectionPage } from './inspections'
+import type { Decision, InspectionPage, InspectionRecord } from './inspections'
 
+const props = defineProps<{ user: CurrentUser }>()
 const emit = defineEmits<{ 'session-expired': [] }>()
 const params = new URLSearchParams(window.location.search)
 const decision = params.get('decision') ?? ''
@@ -23,6 +26,7 @@ const error = ref('')
 const loadedAt = ref<string | null>(null)
 const selectedId = ref(params.get('inspection') ?? '')
 const drawerOpen = ref(Boolean(selectedId.value))
+const selectedRecord = ref<InspectionRecord | null>(null)
 let listRequest: AbortController | undefined
 
 function updateUrl() {
@@ -72,6 +76,7 @@ function clearFilters() {
 }
 
 function openInspection(id: string) {
+  selectedRecord.value = null
   selectedId.value = id
   drawerOpen.value = true
   updateUrl()
@@ -129,6 +134,7 @@ onBeforeUnmount(() => listRequest?.abort())
       </main>
 
       <ElDrawer v-model="drawerOpen" title="检测档案" class="inspection-drawer" size="min(1220px, 96vw)" destroy-on-close @update:model-value="updateUrl">
-        <InspectionDetail v-if="drawerOpen && selectedId" :id="selectedId" @session-expired="emit('session-expired')" />
+        <InspectionDetail v-if="drawerOpen && selectedId" :key="selectedId" :id="selectedId" @loaded="record => { if (record.id === selectedId) selectedRecord = record }" @session-expired="emit('session-expired')" />
+        <QualityReview v-if="drawerOpen && selectedRecord && ['Production', 'Reinspection'].includes(selectedRecord.purpose)" :key="selectedId" :record="selectedRecord" :can-review="props.user.roles.includes('QualityEngineer')" @session-expired="emit('session-expired')" @open-inspection="openInspection" @reviewed="load" />
       </ElDrawer>
 </template>

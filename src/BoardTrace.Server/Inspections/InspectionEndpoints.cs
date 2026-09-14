@@ -63,6 +63,8 @@ public static class InspectionEndpoints
                     return Results.Problem(statusCode: 409, title: "PLC 物理触发身份已被另一检测档案占用。");
                 if (record.Purpose == InspectionPurpose.Production && await db.Inspections.AnyAsync(row => row.BatchId == record.BatchId && row.ProductionSequence == record.ProductionSequence, cancellationToken))
                     return Results.Problem(statusCode: 409, title: "该批次生产序号已被另一检测档案占用。");
+                if (record.ReworkOrderId is Guid orderId && await db.Inspections.AnyAsync(row => row.ReworkOrderId == orderId, cancellationToken))
+                    return Results.Problem(statusCode: 409, title: "该返工指令已有检测尝试，不能再次接件；技术失败或中断也消耗本次指令。");
                 throw;
             }
             return RepeatResult(existing, hash);

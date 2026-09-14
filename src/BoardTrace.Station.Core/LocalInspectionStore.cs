@@ -61,6 +61,7 @@ public sealed partial class LocalInspectionStore(string databasePath)
         InitializeBatches(connection);
         InitializePlc(connection);
         InitializeImageRetention(connection);
+        InitializeRework(connection);
     }
 
     // Images live only in their BLOB columns, never duplicated as base64 in the document.
@@ -77,12 +78,14 @@ public sealed partial class LocalInspectionStore(string databasePath)
             UPDATE Inspections SET Document=$document, TestedImage=$tested, ReferenceImage=$reference
             WHERE Id=$id AND json_extract(Document, '$.executionStatus')='Started'
                 AND json_extract(Document, '$.controllerSessionId') IS $controller
-                AND json_extract(Document, '$.triggerSequence') IS $sequence;
+                AND json_extract(Document, '$.triggerSequence') IS $sequence
+                AND json_extract(Document, '$.reworkOrderId') IS $rework;
             """;
         command.Parameters.AddWithValue("$id", record.Id.ToString());
         command.Parameters.AddWithValue("$document", Document(record));
         command.Parameters.AddWithValue("$controller", record.ControllerSessionId is Guid controller ? controller.ToString() : DBNull.Value);
         command.Parameters.AddWithValue("$sequence", record.TriggerSequence is uint sequence ? (long)sequence : DBNull.Value);
+        command.Parameters.AddWithValue("$rework", record.ReworkOrderId is Guid rework ? rework.ToString() : DBNull.Value);
         command.Parameters.Add("$tested", SqliteType.Blob).Value = (object?)record.TestedImage ?? DBNull.Value;
         command.Parameters.Add("$reference", SqliteType.Blob).Value = (object?)record.ReferenceImage ?? DBNull.Value;
         if (command.ExecuteNonQuery() != 1)

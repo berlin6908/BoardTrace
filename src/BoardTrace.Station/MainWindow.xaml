@@ -32,9 +32,9 @@
                         <StackPanel IsEnabled="{Binding CanEdit}">
                             <TextBlock Text="输入样本" Margin="0,0,0,7" />
                             <ComboBox ItemsSource="{Binding Samples}" SelectedItem="{Binding SelectedSample}" DisplayMemberPath="SampleId"
-                                      Height="36" AutomationProperties.Name="输入样本" IsTextSearchEnabled="True" />
+                                      Height="36" AutomationProperties.Name="输入样本" IsTextSearchEnabled="True" IsEnabled="{Binding CanEditInspectionInput}" />
                             <TextBlock Text="模拟产品编号" Margin="0,18,0,7" />
-                            <TextBox Text="{Binding ProductId, UpdateSourceTrigger=PropertyChanged}" AutomationProperties.Name="模拟产品编号" />
+                            <TextBox Text="{Binding ProductId, UpdateSourceTrigger=PropertyChanged}" AutomationProperties.Name="模拟产品编号" IsEnabled="{Binding CanEditInspectionInput}" />
                             <CheckBox IsChecked="{Binding ConstructedNormal}" Content="使用参考图构造正常输入" Margin="0,18,0,8" />
                             <TextBlock Text="构造输入只验证流程，不代表真实良品。" TextWrapping="Wrap" FontSize="11" Foreground="#687B86" />
                         </StackPanel>
@@ -48,6 +48,17 @@
                                 <Button Content="刷新当前批次批准" Command="{Binding RefreshActiveBatchCommand}" Margin="0,8,0,0" />
                                 <Button Content="本班在线启动" Command="{Binding StartBatchCommand}" Margin="0,8,0,0" />
                                 <TextBlock Text="{Binding BatchNotice}" TextWrapping="Wrap" FontSize="11" Foreground="#687B86" Margin="0,8,0,0" />
+                            </StackPanel>
+                        </Expander>
+                        <Expander x:Name="ReinspectionExpander" Header="返工复检" Margin="0,14,0,0">
+                            <StackPanel Margin="0,10,0,0">
+                                <Button Content="在线获取返工指令" Command="{Binding RefreshReworkOrdersCommand}" />
+                                <ComboBox ItemsSource="{Binding ReworkOrders}" SelectedItem="{Binding SelectedReworkOrder}" DisplayMemberPath="Label"
+                                          IsEnabled="{Binding CanEdit}" AutomationProperties.Name="待执行返工指令" Height="36" Margin="0,8,0,0" />
+                                <Button Content="进入所选复检" Command="{Binding EnterReinspectionCommand}" Margin="0,8,0,0" />
+                                <Button Content="退出复检模式" Command="{Binding ExitReinspectionCommand}" Margin="0,8,0,0" />
+                                <TextBlock Text="{Binding ActiveReworkDescription}" TextWrapping="Wrap" FontSize="11" Foreground="#506775" Margin="0,8,0,0" />
+                                <TextBlock Text="{Binding ReinspectionNotice}" TextWrapping="Wrap" FontSize="11" Foreground="#687B86" Margin="0,8,0,0" />
                             </StackPanel>
                         </Expander>
                         <Expander x:Name="PlcExpander" Header="PLC 设备通信" Margin="0,14,0,0">

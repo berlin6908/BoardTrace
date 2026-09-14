@@ -20,6 +20,8 @@ public sealed class BoardTraceDbContext(DbContextOptions<BoardTraceDbContext> op
     public DbSet<BatchEntity> Batches => Set<BatchEntity>();
     public DbSet<FirstArticleApproval> FirstArticleApprovals => Set<FirstArticleApproval>();
     public DbSet<BatchExecutionSession> BatchExecutionSessions => Set<BatchExecutionSession>();
+    public DbSet<InspectionReview> InspectionReviews => Set<InspectionReview>();
+    public DbSet<ReworkOrder> ReworkOrders => Set<ReworkOrder>();
 
     protected override void OnModelCreating(ModelBuilder model)
     {
@@ -44,6 +46,8 @@ public sealed class BoardTraceDbContext(DbContextOptions<BoardTraceDbContext> op
             .HasFilter("[ControllerSessionId] IS NOT NULL AND [TriggerSequence] IS NOT NULL");
         inspection.HasOne<BatchEntity>().WithMany().HasForeignKey(x => x.BatchId).OnDelete(DeleteBehavior.Restrict);
         inspection.HasOne<BatchExecutionSession>().WithMany().HasForeignKey(x => x.ExecutionSessionId).OnDelete(DeleteBehavior.Restrict);
+        inspection.HasIndex(x => x.ReworkOrderId).IsUnique().HasFilter("[ReworkOrderId] IS NOT NULL");
+        inspection.HasOne<ReworkOrder>().WithMany().HasForeignKey(x => x.ReworkOrderId).OnDelete(DeleteBehavior.Restrict);
         inspection.HasIndex(x => new { x.StationId, x.StartedAt });
         inspection.HasIndex(x => new { x.ProductId, x.StartedAt });
         inspection.HasIndex(x => x.StartedAt);
@@ -94,5 +98,25 @@ public sealed class BoardTraceDbContext(DbContextOptions<BoardTraceDbContext> op
         session.HasIndex(x => new { x.BatchId, x.OperatorId });
         session.HasOne<BatchEntity>().WithMany().HasForeignKey(x => x.BatchId).OnDelete(DeleteBehavior.Restrict);
         session.HasOne<InspectionAttempt>().WithMany().HasForeignKey(x => x.FirstArticleInspectionId).OnDelete(DeleteBehavior.Restrict);
+        var review = model.Entity<InspectionReview>();
+        review.ToTable("InspectionReviews").HasKey(x => x.InspectionId);
+        review.Property(x => x.InspectionId).ValueGeneratedNever();
+        review.Property(x => x.Disposition).HasConversion<string>().HasMaxLength(32);
+        review.Property(x => x.Note).HasMaxLength(2000);
+        review.Property(x => x.ReviewedById).HasMaxLength(450);
+        review.Property(x => x.ReviewedByName).HasMaxLength(128);
+        review.HasOne<InspectionAttempt>().WithOne().HasForeignKey<InspectionReview>(x => x.InspectionId).OnDelete(DeleteBehavior.Restrict);
+        var rework = model.Entity<ReworkOrder>();
+        rework.ToTable("ReworkOrders").HasKey(x => x.Id);
+        rework.Property(x => x.Id).ValueGeneratedNever();
+        rework.Property(x => x.StationId).HasMaxLength(128);
+        rework.Property(x => x.ProductId).HasMaxLength(128);
+        rework.Property(x => x.SampleId).HasMaxLength(128);
+        rework.Property(x => x.RecipeBundleHash).HasMaxLength(64).IsUnicode(false);
+        rework.Property(x => x.Reason).HasMaxLength(2000);
+        rework.Property(x => x.CreatedById).HasMaxLength(450);
+        rework.Property(x => x.CreatedByName).HasMaxLength(128);
+        rework.HasOne<InspectionReview>().WithOne().HasForeignKey<ReworkOrder>(x => x.OriginalInspectionId).OnDelete(DeleteBehavior.Restrict);
+        rework.HasOne<BatchEntity>().WithMany().HasForeignKey(x => x.BatchId).OnDelete(DeleteBehavior.Restrict);
     }
 }

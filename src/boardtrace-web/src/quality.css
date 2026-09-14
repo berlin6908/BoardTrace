@@ -1,0 +1,11 @@
+.quality-review { margin: 24px 0 42px; padding: 22px; border: 1px solid var(--el-border-color); border-radius: 14px; background: #fff; }
+.quality-review .section-heading { margin-bottom: 8px; }
+.quality-form { display: grid; gap: 10px; max-width: 650px; margin-top: 18px; }
+.quality-form label { font-weight: 650; }
+.quality-form > .el-button { justify-self: start; margin-top: 6px; }
+.quality-final { margin: 18px 0; padding: 16px; border-radius: 10px; background: #f0f9f5; }
+.quality-final strong { margin-left: 9px; }
+.quality-final p { white-space: pre-wrap; overflow-wrap: anywhere; }
+.quality-final small { color: #526778; }
+.quality-relation { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 14px; padding: 12px 0; border-top: 1px solid var(--el-border-color-lighter); overflow-wrap: anywhere; }
+.quality-workspace .results-heading { gap: 24px; }

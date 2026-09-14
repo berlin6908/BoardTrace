@@ -28,12 +28,12 @@ public sealed partial class StationViewModel
     private void InitializePlcCommands()
     {
         StartPlcCommand = new RelayCommand(StartPlc, () => !plcRunning && archiveReady && !stopping && !signingOut
-            && !RunCommand.IsRunning && !IsRecipeBusy && !IsBatchBusy && !string.IsNullOrWhiteSpace(PlcHost)
+            && !RunCommand.IsRunning && !IsRecipeBusy && !IsBatchBusy && !IsReworkBusy && !string.IsNullOrWhiteSpace(PlcHost)
             && int.TryParse(PlcPort, out var port) && port is >= 1 and <= 65535);
         StopPlcCommand = new AsyncRelayCommand(StopPlcAsync, () => plcRunning);
     }
 
-    private bool CanAcceptPlc() => CanEdit && !coordinator.IsFaulted && CanContinueProduction();
+    private bool CanAcceptPlc() => CanEdit && !coordinator.IsFaulted && (IsReinspectionMode ? CanContinueReinspection() : CanContinueProduction());
 
     private void StartPlc()
     {
@@ -98,11 +98,14 @@ public sealed partial class StationViewModel
         if (!CanAcceptPlc()) throw new InspectionRejectedException("PLC 只执行已启动、首件批准的当前生产批次。");
         var sample = Samples.SingleOrDefault(item => item.SampleId == input.SampleId)
             ?? throw new InspectionRejectedException("PLC 样本不属于当前批次固定方案。");
+        var purpose = IsReinspectionMode ? InspectionPurpose.Reinspection : InspectionPurpose.Production;
+        if (activeRework is { } rework && (rework.Order.ProductId != input.ProductId || rework.Order.SampleId != input.SampleId))
+            throw new InspectionRejectedException("PLC 产品或样本不属于当前选定返工指令。");
         plcInspecting = true;
         NotifyAccessChanged();
         try
         {
-            var actor = await AuthorizeInspectionAsync(InspectionPurpose.Production);
+            var actor = await AuthorizeInspectionAsync(purpose);
             if (actor is null || stopping || signingOut)
                 throw new InspectionRejectedException("人员授权未通过，PLC 触发未接件。");
             SelectedSample = sample;
@@ -111,7 +114,7 @@ public sealed partial class StationViewModel
             ShowRecord(null);
             // PLC selects an input asset. The UI's constructed-normal switch does
             // not alter a device-triggered production image.
-            var result = await coordinator.InspectAsync(InspectionPurpose.Production, StationId, input.ProductId, actor,
+            var result = await coordinator.InspectAsync(purpose, StationId, input.ProductId, actor,
                 CreateReplaySource(sample, false), new Progress<string>(stage => Status = stage), token, input.Identity, accepted);
             ShowRecord(result);
             Status = result.ExecutionStatus == InspectionExecution.Completed ? "检测完成 · 已保存" : "执行失败 · 已保存";

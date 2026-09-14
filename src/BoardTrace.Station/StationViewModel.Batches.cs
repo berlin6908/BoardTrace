@@ -23,6 +23,7 @@ public sealed partial class StationViewModel
     private StoredInspection? passedFirstArticle;
     private BatchChoice? selectedBatch;
     private string batchNotice = "刷新本工位批次，下载完整方案后执行首件。";
+    private readonly SemaphoreSlim batchRefresh = new(1, 1);
 
     public ObservableCollection<BatchChoice> AssignedBatches { get; } = [];
     public AsyncRelayCommand RefreshBatchesCommand { get; private set; } = null!;
@@ -37,34 +38,38 @@ public sealed partial class StationViewModel
     public string BatchNotice { get => batchNotice; private set => SetProperty(ref batchNotice, value); }
     public string ActiveBatchNumber => activeBatch?.Batch.BatchNumber ?? "未选择批次";
     public string BatchProgress => activeBatch is null ? "工程回放不计入批次数量"
-        : $"本地已接件 {activeBatch.AcceptedProductionCount} / {activeBatch.Batch.PlannedQuantity} · 首件另计";
-    public string InspectionMode => activeBatch is null ? "工程回放 · 模拟输入" : "批次执行 · 模拟输入";
-    public string RunButtonText => activeBatch is null ? "开始检测" : activeBatch.Status == BatchStatus.AwaitingFirstArticle ? "执行首件检测" : "检测生产件";
+        : $"本地已接生产件 {activeBatch.AcceptedProductionCount} / {activeBatch.Batch.PlannedQuantity} · 首件、复检另计";
+    public string InspectionMode => IsReinspectionMode ? "返工复检 · 模拟输入" : activeBatch is null ? "工程回放 · 模拟输入" : "批次执行 · 模拟输入";
+    public string RunButtonText => IsReinspectionMode ? "执行返工复检" : activeBatch is null ? "开始检测" : activeBatch.Status == BatchStatus.AwaitingFirstArticle ? "执行首件检测" : "检测生产件";
     public string BatchStateText
     {
         get
         {
             if (activeBatch is null) return "当前为工程回放";
             if (activeBatch.Status == BatchStatus.Closed) return "批次已关闭";
+            if (activeRework?.InspectionId is not null) return "本次复检已接件 · 不能重复执行";
             if (activeBatch.Status == BatchStatus.AwaitingFirstArticle)
                 return passedFirstArticle is null ? "等待首件检测"
                     : passedFirstArticle.AcknowledgedAt is null ? "首件已通过 · 等待中央接收" : "首件已上传 · 等待质量批准";
-            if (activeBatch.AcceptedProductionCount >= activeBatch.Batch.PlannedQuantity) return "计划数量已接收完毕";
+            if (!IsReinspectionMode && activeBatch.AcceptedProductionCount >= activeBatch.Batch.PlannedQuantity) return "计划数量已接收完毕 · 有票可复检";
             if (activeBatch.Session is not { } session) return "首件已批准 · 等待本班在线启动";
             if (session.ExpiresAt <= DateTimeOffset.UtcNow) return "生产授权已到期 · 请重新登录";
             if (session.OperatorId != currentOperator?.Id) return "等待当前操作员在线启动";
-            return $"批次可生产 · 授权至 {session.ExpiresAt.LocalDateTime:HH:mm}";
+            return $"{(IsReinspectionMode ? "复检可执行" : "批次可生产")} · 授权至 {session.ExpiresAt.LocalDateTime:HH:mm}";
         }
     }
 
     private bool IsBatchBusy => RefreshBatchesCommand.IsRunning || DownloadBatchCommand.IsRunning || RefreshActiveBatchCommand.IsRunning || StartBatchCommand.IsRunning;
-    private bool CanChangeRecipe => CanEdit && activeBatch?.Status != BatchStatus.InProgress;
-    private bool CanRunInspection => activeBatch is null ||
+    private bool CanChangeRecipe => CanEdit && !IsReinspectionMode && activeBatch?.Status != BatchStatus.InProgress;
+    private bool CanRunInspection => IsReinspectionMode ? CanContinueReinspection() : activeBatch is null ||
         (activeBatch.Status == BatchStatus.AwaitingFirstArticle && passedFirstArticle is null) || CanContinueProduction();
 
-    private bool CanContinueProduction() => activeBatch is { Status: BatchStatus.InProgress, Approval: not null, Session: { } session }
+    private bool HasCurrentBatchSession() => activeBatch is { Status: BatchStatus.InProgress, Approval: not null, Session: { } session }
         && session.OperatorId == currentOperator?.Id && session.IssuedAt <= DateTimeOffset.UtcNow && session.ExpiresAt > DateTimeOffset.UtcNow
-        && activeBatch.AcceptedProductionCount < activeBatch.Batch.PlannedQuantity;
+        && session.ArchiveId == activeBatch.ArchiveId;
+
+    private bool CanContinueProduction() => !IsReinspectionMode && HasCurrentBatchSession()
+        && activeBatch!.AcceptedProductionCount < activeBatch.Batch.PlannedQuantity;
 
     private void InitializeBatchCommands()
     {
@@ -73,8 +78,8 @@ public sealed partial class StationViewModel
             && !coordinator.IsFaulted && (activeBatch is null || activeBatch.Batch.Id == SelectedBatch.Summary.Batch.Id));
         RefreshActiveBatchCommand = new AsyncRelayCommand(RefreshActiveBatchAsync, () => CanEdit && batchClient != null && activeBatch != null && !coordinator.IsFaulted);
         StartBatchCommand = new AsyncRelayCommand(StartBatchAsync, () => CanEdit && !coordinator.IsFaulted && activeBatch is { Approval: not null }
-            && activeBatch.Status is BatchStatus.Approved or BatchStatus.InProgress && !CanContinueProduction()
-            && activeBatch.AcceptedProductionCount < activeBatch.Batch.PlannedQuantity);
+            && activeBatch.Status is BatchStatus.Approved or BatchStatus.InProgress && !HasCurrentBatchSession()
+            && (activeBatch.AcceptedProductionCount < activeBatch.Batch.PlannedQuantity || ReworkOrders.Count > 0));
         foreach (var command in new[] { RefreshBatchesCommand, DownloadBatchCommand, RefreshActiveBatchCommand, StartBatchCommand })
             command.PropertyChanged += (_, change) =>
             {
@@ -105,14 +110,21 @@ public sealed partial class StationViewModel
 
     private async Task RefreshBatchStateAsync()
     {
-        var state = await Task.Run(() =>
+        await batchRefresh.WaitAsync();
+        try
         {
-            var batch = store.ReadActiveBatch();
-            return (Batch: batch, Pass: batch is null ? null : store.ReadPassedFirstArticle(batch.Batch.Id));
-        });
-        activeBatch = state.Batch;
-        passedFirstArticle = state.Pass;
-        UpdateBatchDisplay();
+            var state = await Task.Run(() =>
+            {
+                var batch = store.ReadActiveBatch();
+                return (Batch: batch, Pass: batch is null ? null : store.ReadPassedFirstArticle(batch.Batch.Id),
+                    Rework: store.ReadSelectedReworkOrder(), Pending: batch is null ? Array.Empty<ReworkOrder>() : store.ReadPendingReworkOrders(batch.Batch.Id));
+            });
+            activeBatch = state.Batch;
+            passedFirstArticle = state.Pass;
+            UpdateReworkDisplay(state.Rework, state.Pending);
+            UpdateBatchDisplay();
+        }
+        finally { batchRefresh.Release(); }
     }
 
     private void UpdateBatchDisplay()
@@ -252,13 +264,14 @@ public sealed partial class StationViewModel
         {
             var unavailable = error is HttpRequestException { StatusCode: null } or OperationCanceledException
                 || error is HttpRequestException { StatusCode: >= HttpStatusCode.InternalServerError };
-            if (!stopping && !signingOut && purpose == InspectionPurpose.Production && unavailable && CanContinueProduction())
+            if (!stopping && !signingOut && unavailable &&
+                ((purpose == InspectionPurpose.Production && CanContinueProduction()) || (purpose == InspectionPurpose.Reinspection && CanContinueReinspection())))
             {
                 BatchNotice = "中央暂不可达，按当前批次与未过期人员授权继续；原件保留并等待补传。";
                 return currentOperator;
             }
             Status = "无法验证人员登录 · 未接受检测";
-            Notice = purpose == InspectionPurpose.Production ? "请检查中央连接与批次启动授权后重试。" : "工程回放和首件需要在线验证人员身份，请恢复连接后重试。";
+            Notice = purpose is InspectionPurpose.Production or InspectionPurpose.Reinspection ? "请检查中央连接与批次启动授权后重试。" : "工程回放和首件需要在线验证人员身份，请恢复连接后重试。";
             return null;
         }
     }

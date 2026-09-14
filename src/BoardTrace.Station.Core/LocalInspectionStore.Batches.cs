@@ -13,7 +13,7 @@ public sealed record CachedBatchState(BatchDefinition Batch, BatchStatus Status,
 }
 
 public sealed record InspectionAcceptance(InspectionRecord Record, bool IsNew);
-public sealed record CachedBatchResume(CachedBatchState Batch, byte[] ProtectedPayload);
+public sealed record CachedBatchResume(CachedBatchState Batch, byte[] ProtectedPayload, bool HasPendingRework);
 
 public sealed partial class LocalInspectionStore
 {
@@ -68,8 +68,14 @@ public sealed partial class LocalInspectionStore
         command.CommandText = "SELECT ProtectedPayload FROM OfflineBatchResume WHERE Slot=1 AND SessionId=$session;";
         command.Parameters.AddWithValue("$session", session.Id.ToString());
         var payload = command.ExecuteScalar() as byte[];
+        using var pending = connection.CreateCommand();
+        pending.Transaction = transaction;
+        pending.CommandText = "SELECT EXISTS(SELECT 1 FROM ReworkOrders WHERE BatchId=$batch AND ArchiveId=$archive AND InspectionId IS NULL);";
+        pending.Parameters.AddWithValue("$batch", active.Batch.Id.ToString());
+        pending.Parameters.AddWithValue("$archive", active.ArchiveId.ToString());
+        var hasPendingRework = (long)pending.ExecuteScalar()! != 0;
         transaction.Commit();
-        return payload is null ? null : new CachedBatchResume(active, payload);
+        return payload is null ? null : new CachedBatchResume(active, payload, hasPendingRework);
     }
 
     public StoredInspection? ReadPassedFirstArticle(Guid batchId)
@@ -190,7 +196,7 @@ public sealed partial class LocalInspectionStore
         {
             using var clear = connection.CreateCommand();
             clear.Transaction = transaction;
-            clear.CommandText = "DELETE FROM OfflineBatchResume WHERE Slot=1;";
+            clear.CommandText = "DELETE FROM OfflineBatchResume WHERE Slot=1; DELETE FROM ActiveRework WHERE Slot=1;";
             clear.ExecuteNonQuery();
         }
         transaction.Commit();
@@ -258,6 +264,8 @@ public sealed partial class LocalInspectionStore
         var active = ReadActiveBatch(connection, transaction);
         if (active?.Status == BatchStatus.InProgress)
             throw new InspectionRejectedException("在制批次不能切换为工程回放，请先完成批次。");
+        if (ReadSelectedReworkOrder(connection, transaction) is not null)
+            throw new InspectionRejectedException("请先明确退出复检模式，再切换工程方案。");
         using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = "DELETE FROM ActiveBatch WHERE Slot=1;";
@@ -280,6 +288,9 @@ public sealed partial class LocalInspectionStore
         }
         RequireNoUnacknowledgedPlc(connection, transaction);
         var active = ReadActiveBatch(connection, transaction);
+        var selectedRework = ReadSelectedReworkOrder(connection, transaction);
+        if (record.Purpose != InspectionPurpose.Reinspection && (record.ReworkOrderId is not null || selectedRework is not null))
+            throw new InspectionRejectedException("当前为复检模式，请明确退出后再接普通生产件。");
         if (record.Purpose == InspectionPurpose.EngineeringReplay)
         {
             if (active is not null) throw new InspectionRejectedException("请先退出当前批次选择，再执行工程回放。");
@@ -306,7 +317,7 @@ public sealed partial class LocalInspectionStore
                 pass.Parameters.AddWithValue("$batch", batch.Id.ToString());
                 if ((long)pass.ExecuteScalar()! != 0) throw new InspectionRejectedException("首件已通过，等待上传和质量批准。");
             }
-            else if (record.Purpose == InspectionPurpose.Production)
+            else if (record.Purpose is InspectionPurpose.Production or InspectionPurpose.Reinspection)
             {
                 var session = active.Session;
                 if (active.Status != BatchStatus.InProgress || active.Approval is null || session is null)
@@ -316,14 +327,27 @@ public sealed partial class LocalInspectionStore
                     throw new InspectionRejectedException("当前操作员或方案不属于已启动批次会话。");
                 if (record.StartedAt < session.IssuedAt || record.StartedAt >= session.ExpiresAt)
                     throw new InspectionRejectedException("人员启动会话已过期，请重新登录并在线启动。");
-                if (active.NextProductionSequence > batch.PlannedQuantity)
-                    throw new InspectionRejectedException("批次计划数量已用完，不能接受新生产件。");
-                record = record with { ExecutionSessionId = session.Id, ProductionSequence = active.NextProductionSequence };
-                using var next = connection.CreateCommand();
-                next.Transaction = transaction;
-                next.CommandText = "UPDATE CachedBatches SET NextProductionSequence=NextProductionSequence+1 WHERE Id=$id;";
-                next.Parameters.AddWithValue("$id", batch.Id.ToString());
-                next.ExecuteNonQuery();
+                record = record with { ExecutionSessionId = session.Id, ProductionSequence = null };
+                if (record.Purpose == InspectionPurpose.Reinspection)
+                {
+                    if (selectedRework is null || selectedRework.InspectionId is not null || selectedRework.Order.Id != record.ReworkOrderId)
+                        throw new InspectionRejectedException("须选择尚未接件的缓存返工指令；已中断的复检不能重采。");
+                    RequireReworkBatch(selectedRework.Order, active);
+                    if (selectedRework.ArchiveId != active.ArchiveId || selectedRework.Order.ProductId != record.ProductId ||
+                        selectedRework.Order.SampleId != record.SampleId)
+                        throw new InspectionRejectedException("复检须使用原档案及指令固定的产品、样本。");
+                }
+                else
+                {
+                    if (active.NextProductionSequence > batch.PlannedQuantity)
+                        throw new InspectionRejectedException("批次计划数量已用完，不能接受新生产件。");
+                    record = record with { ProductionSequence = active.NextProductionSequence };
+                    using var next = connection.CreateCommand();
+                    next.Transaction = transaction;
+                    next.CommandText = "UPDATE CachedBatches SET NextProductionSequence=NextProductionSequence+1 WHERE Id=$id;";
+                    next.Parameters.AddWithValue("$id", batch.Id.ToString());
+                    next.ExecuteNonQuery();
+                }
             }
             else throw new InspectionRejectedException("检测用途无效。");
         }
@@ -334,6 +358,15 @@ public sealed partial class LocalInspectionStore
         insert.Parameters.AddWithValue("$started", record.StartedAt.ToUnixTimeMilliseconds());
         insert.Parameters.AddWithValue("$document", Document(record));
         insert.ExecuteNonQuery();
+        if (record.Purpose == InspectionPurpose.Reinspection)
+        {
+            using var consume = connection.CreateCommand();
+            consume.Transaction = transaction;
+            consume.CommandText = "UPDATE ReworkOrders SET InspectionId=$inspection WHERE Id=$order AND InspectionId IS NULL;";
+            consume.Parameters.AddWithValue("$inspection", record.Id.ToString());
+            consume.Parameters.AddWithValue("$order", record.ReworkOrderId!.Value.ToString());
+            if (consume.ExecuteNonQuery() != 1) throw new InspectionRejectedException("返工指令已接件，不能重复执行。");
+        }
         if (identity is { } trigger)
         {
             using var physical = connection.CreateCommand();

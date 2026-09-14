@@ -3,11 +3,11 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { ElAlert, ElButton, ElCollapse, ElCollapseItem, ElEmpty, ElSkeleton, ElSwitch, ElTag } from 'element-plus'
 import { ApiError, currentUser, getInspection, requestError } from '../api'
 import { classLabel, decisionLabels, executionLabels, formatMs, formatTime, purposeLabels, sourceLabel } from '../inspections'
-import type { InspectionDetail } from '../inspections'
+import type { InspectionDetail, InspectionRecord } from '../inspections'
 import EvidenceImage from './EvidenceImage.vue'
 
 const props = defineProps<{ id: string }>()
-const emit = defineEmits<{ 'session-expired': []; 'evidence-ready': [id: string] }>()
+const emit = defineEmits<{ 'session-expired': []; 'evidence-ready': [id: string]; loaded: [record: InspectionRecord] }>()
 const detail = ref<InspectionDetail | null>(null)
 const record = computed(() => detail.value?.inspection)
 const loading = ref(true)
@@ -30,7 +30,7 @@ async function load() {
   error.value = ''
   try {
     const response = await getInspection(props.id, request.signal)
-    if (!request.signal.aborted) detail.value = response
+    if (!request.signal.aborted) { detail.value = response; emit('loaded', response.inspection) }
   } catch (cause) {
     if (!request.signal.aborted) {
       if (cause instanceof ApiError && cause.status === 401) emit('session-expired')
@@ -86,6 +86,7 @@ onBeforeUnmount(() => detailRequest?.abort())
       <div><dt>检测工位</dt><dd>{{ record.stationId }}</dd></div>
       <div><dt>业务用途</dt><dd>{{ purposeLabels[record.purpose] }}</dd></div>
       <div v-if="record.batchId"><dt>批次 ID</dt><dd>{{ record.batchId }}</dd></div>
+      <div v-if="record.reworkOrderId"><dt>返工指令 ID</dt><dd>{{ record.reworkOrderId }}</dd></div>
       <div v-if="record.productionSequence"><dt>生产序号</dt><dd>{{ record.productionSequence }}</dd></div>
       <div v-if="record.executionSessionId"><dt>执行会话 ID</dt><dd>{{ record.executionSessionId }}</dd></div>
       <div v-if="record.controllerSessionId"><dt>PLC 会话 ID</dt><dd>{{ record.controllerSessionId }}</dd></div>

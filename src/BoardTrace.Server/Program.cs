@@ -5,6 +5,7 @@ using BoardTrace.Server.Identity;
 using Microsoft.AspNetCore.Identity;
 using BoardTrace.Server.Recipes;
 using BoardTrace.Server.Batches;
+using BoardTrace.Server.Quality;
 
 var builder = WebApplication.CreateBuilder(new WebApplicationOptions
 {
@@ -58,6 +59,7 @@ app.MapInspections();
 app.MapRecipes();
 app.MapRecipePublications();
 app.MapBatches();
+app.MapQuality();
 app.MapMethods("/api/{**path}", ["GET", "POST", "PUT", "DELETE", "PATCH"], () => Results.NotFound());
 app.MapFallbackToFile("index.html");
 app.Run();

@@ -75,6 +75,9 @@ public sealed class InspectionCoordinator
     public void StartBatch(BatchExecutionSession session, byte[]? resumePayload) =>
         ChangeWhileIdle(() => store.SaveExecutionSession(session, resumePayload));
 
+    public void UseReworkOrder(Guid orderId) => ChangeWhileIdle(() => store.SelectReworkOrder(orderId));
+    public void ExitReinspection() => ChangeWhileIdle(store.ExitReinspection);
+
     public void EndOperatorSession()
     {
         if (Interlocked.CompareExchange(ref busy, 1, 0) != 0)
@@ -137,6 +140,7 @@ public sealed class InspectionCoordinator
                     ControllerSessionId = identity?.ControllerSessionId, TriggerSequence = identity?.TriggerSequence,
                     OperatorId = operatorId, OperatorName = operatorName,
                     SampleId = source.SampleId, SourceKind = source.SourceKind,
+                    ReworkOrderId = purpose == InspectionPurpose.Reinspection ? store.ReadSelectedReworkOrder()?.Order.Id : null,
                     RecipeId = recipeId, RecipeJson = recipeJson, StartedAt = DateTimeOffset.UtcNow
                 };
                 var accepted = store.BeginAccepted(record, publishedRecipe?.BundleHash);

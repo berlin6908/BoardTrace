@@ -11,6 +11,7 @@ public sealed class InspectionAttempt
     public InspectionPurpose Purpose { get; set; }
     public Guid? BatchId { get; set; }
     public Guid? ExecutionSessionId { get; set; }
+    public Guid? ReworkOrderId { get; set; }
     public int? ProductionSequence { get; set; }
     public Guid? ControllerSessionId { get; set; }
     public long? TriggerSequence { get; set; }
@@ -40,7 +41,7 @@ public sealed class InspectionAttempt
         {
             Id = record.Id, StationId = record.StationId, ProductId = record.ProductId,
             Purpose = record.Purpose, BatchId = record.BatchId, ExecutionSessionId = record.ExecutionSessionId,
-            ProductionSequence = record.ProductionSequence,
+            ProductionSequence = record.ProductionSequence, ReworkOrderId = record.ReworkOrderId,
             ControllerSessionId = record.ControllerSessionId, TriggerSequence = record.TriggerSequence,
             OperatorId = record.OperatorId, OperatorName = record.OperatorName,
             SampleId = record.SampleId, SourceKind = record.SourceKind, RecipeId = record.RecipeId,
@@ -62,7 +63,7 @@ public sealed class InspectionAttempt
     public InspectionRecord ToRecord() => new()
     {
         Id = Id, StationId = StationId, ProductId = ProductId, OperatorId = OperatorId, OperatorName = OperatorName,
-        Purpose = Purpose, BatchId = BatchId, ExecutionSessionId = ExecutionSessionId, ProductionSequence = ProductionSequence,
+        Purpose = Purpose, BatchId = BatchId, ExecutionSessionId = ExecutionSessionId, ProductionSequence = ProductionSequence, ReworkOrderId = ReworkOrderId,
         ControllerSessionId = ControllerSessionId, TriggerSequence = TriggerSequence is null ? null : checked((uint)TriggerSequence.Value),
         SampleId = SampleId, SourceKind = SourceKind,
         RecipeId = RecipeId, RecipeJson = RecipeJson, StartedAt = StartedAt, CompletedAt = CompletedAt,
