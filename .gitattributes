@@ -3,3 +3,6 @@
 *.sh text eol=lf
 *.sbatch text eol=lf
 *.jsonl text eol=lf
+
+# Public walkthroughs and embedded screenshots are product documentation.
+showcase/** linguist-documentation
