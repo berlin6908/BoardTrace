@@ -14,6 +14,7 @@ from tools.simulator.protocol import Heartbeat, Trigger, encode_input, decode_ou
 from tools.simulator.state import SimulatorState
 from tools.simulator.controller import Simulator, create_device, serve
 from pymodbus.client import AsyncModbusTcpClient
+from pymodbus.exceptions import ConnectionException, ModbusIOException
 
 
 def result_registers(trigger, inspection_id=None):
@@ -154,7 +155,7 @@ class ProtocolStation:
         self.ready = ready
         self.ready_after_ack = ready_after_ack
 
-    async def drive(self, port, server_task):
+    async def drive(self, port, server_task, terminal_recorded=None):
         client = AsyncModbusTcpClient("127.0.0.1", port=port, timeout=0.25, retries=0)
         for _ in range(100):
             if await client.connect():
@@ -203,8 +204,8 @@ class ProtocolStation:
                 written = await client.write_registers(100, words, device_id=1)
                 assert not written.isError()
                 await asyncio.sleep(0.01)
-        except Exception:
-            if not server_task.done():
+        except (ConnectionException, ModbusIOException):
+            if not server_task.done() and not (terminal_recorded and terminal_recorded()):
                 raise
         finally:
             client.close()
@@ -354,7 +355,12 @@ async def run_cli(tmp_path, peer, scenario="normal", timeout=2, ack_delay=2, cou
         if task.done():
             break
         await asyncio.sleep(0.01)
-    station_task = asyncio.create_task(peer.drive(port, task))
+
+    def terminal_recorded():
+        lines = events_file.read_text().splitlines()[old_lines:]
+        return bool(lines) and json.loads(lines[-1])["kind"] in ("finished", "error")
+
+    station_task = asyncio.create_task(peer.drive(port, task, terminal_recorded))
     try:
         _, error = await asyncio.wait_for(task, 8)
         await asyncio.wait_for(station_task, 2)
@@ -379,7 +385,7 @@ def test_cli_normal_two_products_finish_both_ack_cycles(tmp_path):
     assert [row["resultCount"] for row in events if row["kind"] == "completed"] == [1, 2]
 
 
-def test_cli_process_restart_completes_pending_and_preserves_events(tmp_path):
+def test_cli_process_restart_completes_pending_and_preserves_events(tmp_path, monkeypatch):
     peer = ProtocolStation()
     state_file, events_file = tmp_path / "controller.db", tmp_path / "events.jsonl"
     failed, error = asyncio.run(run_cli(tmp_path, peer, "lost-ack", timeout=0.5))
@@ -387,7 +393,17 @@ def test_cli_process_restart_completes_pending_and_preserves_events(tmp_path):
     with SimulatorState(state_file) as state:
         pending = state.pending
         assert pending is not None and state.result_count == 1
-    succeeded, error = asyncio.run(run_cli(tmp_path, peer, "lost-ack", product_prefix="CHANGED"))
+    communicate = asyncio.subprocess.Process.communicate
+
+    async def delayed_communicate(process):
+        result = await communicate(process)
+        # The real Modbus server has shut down; pipe completion can arrive later.
+        await asyncio.sleep(0.5)
+        return result
+
+    with monkeypatch.context() as lifecycle:
+        lifecycle.setattr(asyncio.subprocess.Process, "communicate", delayed_communicate)
+        succeeded, error = asyncio.run(run_cli(tmp_path, peer, "lost-ack", product_prefix="CHANGED"))
     assert succeeded == 0, error
     with SimulatorState(state_file) as state:
         assert state.pending is None and state.result_count == 1
